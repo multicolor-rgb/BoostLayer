@@ -1388,8 +1388,8 @@ class GLRenderer(threading.Thread):
 
         self._monitor = glfw.get_primary_monitor()
         mode = glfw.get_video_mode(self._monitor)
-        self._windowed_size = (mode.width, mode.height)
-        self._win = glfw.create_window(mode.width, mode.height,
+        self._windowed_size = (mode.size.width, mode.size.height)
+        self._win = glfw.create_window(mode.size.width, mode.size.height,
                                        APP_NAME, None, None)
         if not self._win:
             glfw.terminate()
@@ -1544,7 +1544,7 @@ class GLRenderer(threading.Thread):
         if active:
             mode = glfw.get_video_mode(self._monitor)
             glfw.set_window_monitor(self._win, self._monitor, 0, 0,
-                                    mode.width, mode.height,
+                                    mode.size.width, mode.size.height,
                                     mode.refresh_rate)
             glfw.show_window(self._win)
         else:
