@@ -5,6 +5,7 @@ PyOpenGL>=3.1.6
 PyOpenGL_accelerate>=3.1.6
 glfw>=2.5.0
 mss>=9.0.0
+python-xlib>=0.33          # XComposite capture (windows occluded by the overlay)
 pynput>=1.7.6
 evdev>=1.6.0
 numpy>=1.24.0

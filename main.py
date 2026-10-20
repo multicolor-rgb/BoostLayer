@@ -106,7 +106,10 @@ TRANSLATIONS = {
         "capture_target": "Capture target",
         "fullscreen": "Fullscreen",
         "active_window": "Active Window",
-        "capture_note": "Active Window requires X11 + xdotool. On Wayland, capture uses mss (XWayland) with a grim/wlr-screencopy fallback.",
+        "window": "Window",
+        "target_window": "Target window",
+        "refresh": "Refresh",
+        "capture_note": "Window mode captures the selected window via XComposite (works even when covered by the overlay). Run the game in windowed mode for best results.",
         "performance_osd": "Performance OSD",
         "displayed_metrics": "Displayed metrics",
         "metric_fps": "FPS (Capture & Render)",
@@ -149,7 +152,10 @@ TRANSLATIONS = {
         "capture_target": "Aufnahmeziel",
         "fullscreen": "Vollbild",
         "active_window": "Aktives Fenster",
-        "capture_note": "Aktives Fenster benötigt X11 + xdotool. Unter Wayland nutzt die Aufnahme mss (XWayland) mit grim/wlr-screencopy-Fallback.",
+        "window": "Fenster",
+        "target_window": "Zielfenster",
+        "refresh": "Aktualisieren",
+        "capture_note": "Fenstermodus erfasst das gewählte Fenster über XComposite (funktioniert auch, wenn es vom Overlay verdeckt wird). Spiel im Fenstermodus starten.",
         "performance_osd": "Performance-OSD",
         "displayed_metrics": "Angezeigte Metriken",
         "metric_fps": "FPS (Aufnahme & Render)",
@@ -192,7 +198,10 @@ TRANSLATIONS = {
         "capture_target": "Cel przechwytywania",
         "fullscreen": "Pełny ekran",
         "active_window": "Aktywne okno",
-        "capture_note": "Aktywne okno wymaga X11 + xdotool. Na Wayland przechwytywanie używa mss (XWayland) z fallbackiem grim/wlr-screencopy.",
+        "window": "Okno",
+        "target_window": "Okno docelowe",
+        "refresh": "Odśwież",
+        "capture_note": "Tryb Okno przechwytuje wybrane okno przez XComposite (działa też, gdy jest zasłonięte overlayem). Uruchom grę w trybie okienkowym.",
         "performance_osd": "OSD wydajności",
         "displayed_metrics": "Wyświetlane metryki",
         "metric_fps": "FPS (Przechwyt i render)",
@@ -867,6 +876,7 @@ class AppState:
         self.fg_enabled = False
         self.capture_delay_ms = 0
         self.capture_target = "fullscreen"   # "fullscreen" | "window"
+        self.capture_window_id = None        # X11 window id for XComposite
         self.osd_enabled = True
         self.osd_show_fps = True
         self.osd_show_cpu = True
@@ -909,6 +919,7 @@ class AppState:
                 "fg_enabled": self.fg_enabled,
                 "capture_delay_ms": self.capture_delay_ms,
                 "capture_target": self.capture_target,
+                "capture_window_id": self.capture_window_id,
                 "osd_enabled": self.osd_enabled,
                 "osd_show_fps": self.osd_show_fps,
                 "osd_show_cpu": self.osd_show_cpu,
@@ -1103,6 +1114,183 @@ def _decode_png(data):
     return bgra
 
 
+# ---------------------------------------------------------------------------
+# XComposite window capture (python-xlib) — captures an occluded window
+# (e.g. a windowed game covered by the fullscreen overlay) without the mss
+# self-capture feedback loop.
+# ---------------------------------------------------------------------------
+def list_windows():
+    """Return [(window_id, title, width, height), ...] for visible top-level
+    X11 windows, using python-xlib (no external tools)."""
+    try:
+        from Xlib import display, X
+    except ImportError:
+        return []
+    try:
+        d = display.Display()
+    except Exception:
+        return []
+    root = d.screen().root
+    try:
+        net_name = d.intern_atom("_NET_WM_NAME")
+    except Exception:
+        net_name = None
+    windows = []
+    try:
+        children = root.query_tree().children
+    except Exception:
+        children = []
+    for w in children:
+        name = None
+        try:
+            name = w.get_wm_name()
+        except Exception:
+            name = None
+        if not name and net_name is not None:
+            try:
+                prop = w.get_full_property(net_name, 0)
+                if prop and prop.value:
+                    v = prop.value
+                    name = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+            except Exception:
+                name = None
+        if not name:
+            continue
+        try:
+            geo = w.get_geometry()
+            attrs = w.get_attributes()
+        except Exception:
+            continue
+        if attrs.map_state != X.IsViewable:
+            continue
+        if geo.width < 60 or geo.height < 60:
+            continue
+        windows.append((int(w.id), name, geo.width, geo.height))
+    try:
+        d.close()
+    except Exception:
+        pass
+    windows.sort(key=lambda t: t[1].lower())
+    return windows
+
+
+def _mask_to_byte(mask):
+    """Return the byte offset (0-based) of the lowest set bit in a channel mask."""
+    if not mask:
+        return 0
+    m = int(mask)
+    return ((m & -m).bit_length() - 1) // 8
+
+
+class XCompositeCapture:
+    """Capture a specific X11 window via the Composite extension.
+
+    XCompositeRedirectWindow keeps the window's content in an off-screen
+    buffer, so it can be captured even when occluded by the overlay."""
+
+    def __init__(self, window_id):
+        from Xlib import display, X
+        from Xlib.ext import composite
+        self._X = X
+        self.window_id = int(window_id)
+        # Default channel order (little-endian TrueColor: BGRX/BGRA).
+        self._bpp = 4
+        self._r_byte = 2
+        self._g_byte = 1
+        self._b_byte = 0
+        try:
+            self._d = display.Display()
+        except Exception:
+            self._d = None
+            self._ok = False
+            return
+        self._win = self._d.create_resource_object("window", self.window_id)
+        self._ok = False
+        try:
+            self._win.composite_redirect_window(composite.RedirectAutomatic)
+            self._d.sync()
+            self._ok = True
+            self._read_visual_format()
+        except Exception as e:
+            print("[BoostLayer] XComposite redirect failed:", e)
+
+    def _read_visual_format(self):
+        """Determine bytes-per-pixel and channel byte order from the visual."""
+        try:
+            attrs = self._win.get_attributes()
+            vis_id = attrs.visual
+            for depth in self._d.screen().allowed_depths:
+                for v in depth.visuals:
+                    if v.visual_id == vis_id:
+                        self._bpp = max(1, depth.depth // 8)
+                        self._r_byte = _mask_to_byte(v.red_mask)
+                        self._g_byte = _mask_to_byte(v.green_mask)
+                        self._b_byte = _mask_to_byte(v.blue_mask)
+                        return
+        except Exception:
+            pass
+
+    def _to_bgra(self, image, w, h):
+        bpp = self._bpp
+        data = image.data
+        if isinstance(data, str):
+            data = data.encode("latin-1")
+        raw = np.frombuffer(data, dtype=np.uint8)
+        if raw.size < w * bpp * h:
+            return None
+        bpl = raw.size // h if h > 0 else 0
+        if bpl < w * bpp:
+            return None
+        raw = raw.reshape(h, bpl)[:, : w * bpp].reshape(h, w, bpp).copy()
+        rb = min(self._r_byte, bpp - 1)
+        gb = min(self._g_byte, bpp - 1)
+        bb = min(self._b_byte, bpp - 1)
+        bgra = np.empty((h, w, 4), dtype=np.uint8)
+        bgra[:, :, 0] = raw[:, :, bb]
+        bgra[:, :, 1] = raw[:, :, gb]
+        bgra[:, :, 2] = raw[:, :, rb]
+        bgra[:, :, 3] = 255
+        return bgra
+
+    def grab(self):
+        if not self._ok or self._d is None:
+            return None
+        try:
+            geo = self._win.get_geometry()
+        except Exception:
+            return None
+        w, h = geo.width, geo.height
+        if w <= 0 or h <= 0:
+            return None
+        try:
+            pixmap = self._win.composite_name_window_pixmap()
+        except Exception:
+            return None
+        image = None
+        try:
+            image = pixmap.get_image(0, 0, w, h, self._X.ZPixmap, 0xFFFFFFFF)
+        except Exception:
+            image = None
+        try:
+            pixmap.free()
+        except Exception:
+            pass
+        if image is None:
+            return None
+        return self._to_bgra(image, w, h)
+
+    def release(self):
+        try:
+            self._win.composite_unredirect_window(0)
+        except Exception:
+            pass
+        try:
+            self._d.close()
+        except Exception:
+            pass
+        self._ok = False
+
+
 class CaptureThread(threading.Thread):
     def __init__(self, state, stats_collector=None):
         super().__init__(name="BoostLayer-Capture", daemon=True)
@@ -1111,67 +1299,48 @@ class CaptureThread(threading.Thread):
         self.display = detect_display_server()
         self._sct = None
         self._monitor = None
+        self._xcomp = None
         self._seq = 0
         self._last_window_refresh = 0.0
         self._window_region = None
         self._active_event = threading.Event()
         self._last_grim_ts = 0.0
 
-    # -- window geometry (X11 via xdotool) ---------------------------------
-    def _active_window_region(self):
-        if not shutil.which("xdotool"):
-            return None
-        try:
-            out = subprocess.run(
-                ["xdotool", "getactivewindow", "getwindowgeometry", "--shell"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=1, text=True,
-            ).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        d = {}
-        for line in out.splitlines():
-            if "=" in line:
-                k, _, v = line.partition("=")
-                d[k.strip()] = v.strip()
-        try:
-            x = int(d["X"]); y = int(d["Y"])
-            w = int(d["WIDTH"]); h = int(d["HEIGHT"])
-            if w > 0 and h > 0:
-                return (x, y, w, h)
-        except (KeyError, ValueError):
-            return None
-        return None
-
     def _open(self):
-        if not HAS_MSS:
-            return False
-        self._sct = mss.mss()
-        self._monitor = self._sct.monitors[1]  # primary monitor
+        # mss is used for fullscreen capture; XComposite capture does not
+        # require it, so the thread still runs if mss is unavailable.
+        self._sct = None
+        self._monitor = None
+        if HAS_MSS:
+            self._sct = mss.mss()
+            self._monitor = self._sct.monitors[1]  # primary monitor
         return True
 
-    def _grab(self):
-        region = None
+    def _grab_frame(self):
+        """Dispatch to the appropriate capture backend."""
         target = self.state.capture_target
-        if target == "window":
-            now = time.time()
-            if now - self._last_window_refresh > 0.5:
-                self._window_region = self._active_window_region()
-                self._last_window_refresh = now
-            if self._window_region is None:
-                # No window info yet -> fall back to fullscreen.
-                region = self._monitor
-            else:
-                x, y, w, h = self._window_region
-                region = {"left": x, "top": y, "width": w, "height": h}
-        else:
-            region = self._monitor
+        win_id = self.state.capture_window_id
+        if target == "window" and win_id:
+            arr = self._grab_xcomp(win_id)
+            if arr is None and self.display == "wayland":
+                arr = self._grab_grim()
+            return arr
+        if self._sct is None:
+            return None
+        return self._grab_mss()
 
-        shot = self._sct.grab(region)
+    def _grab_mss(self):
+        shot = self._sct.grab(self._monitor)
         w = shot.width
         h = shot.height
-        arr = np.frombuffer(shot.raw, dtype=np.uint8).reshape(h, w, 4)
-        return arr, shot
+        return np.frombuffer(shot.raw, dtype=np.uint8).reshape(h, w, 4)
+
+    def _grab_xcomp(self, win_id):
+        if self._xcomp is None or self._xcomp.window_id != win_id:
+            if self._xcomp is not None:
+                self._xcomp.release()
+            self._xcomp = XCompositeCapture(win_id)
+        return self._xcomp.grab()
 
     def _grab_grim(self):
         """Wayland-native fallback: capture the focused output via 'grim'
@@ -1208,24 +1377,22 @@ class CaptureThread(threading.Thread):
                 self._active_event.set()
                 arr = None
                 try:
-                    arr, shot = self._grab()
+                    arr = self._grab_frame()
                 except Exception:
-                    if self.display == "wayland":
-                        arr = self._grab_grim()
-                    if arr is None:
-                        time.sleep(0.05)
-                        continue
+                    arr = None
+                if arr is None:
+                    time.sleep(0.02)
+                    continue
                 self._seq += 1
                 self.state.put_frame(arr, self._seq, time.time())
                 if self.stats is not None:
                     self.stats.bump_capture()
-                # 'arr' is a zero-copy view into the screenshot buffer and is
-                # referenced by the state slot, so the underlying bytes stay
-                # valid after the ScreenShot object is released.
                 delay = self.state.capture_delay_ms
                 if delay > 0:
                     time.sleep(delay / 1000.0)
         finally:
+            if self._xcomp is not None:
+                self._xcomp.release()
             if self._sct is not None:
                 try:
                     self._sct.close()
@@ -1394,6 +1561,10 @@ class GLRenderer(threading.Thread):
         if not self._win:
             glfw.terminate()
             raise RuntimeError("glfw.create_window() failed")
+        # Borderless full-screen overlay: undecorated + always-on-top window
+        # pinned to (0,0). We deliberately do NOT use set_window_monitor()
+        # (exclusive fullscreen) so we never fight the game's own fullscreen.
+        glfw.set_window_pos(self._win, 0, 0)
         glfw.make_context_current(self._win)
         glfw.swap_interval(1)
 
@@ -1541,15 +1712,12 @@ class GLRenderer(threading.Thread):
             self._cleanup()
 
     def _apply_active(self, active):
+        # The window is already a borderless full-screen overlay; simply show
+        # or hide it. No exclusive-fullscreen switch, so the target game is
+        # never kicked out of its own fullscreen mode.
         if active:
-            mode = glfw.get_video_mode(self._monitor)
-            glfw.set_window_monitor(self._win, self._monitor, 0, 0,
-                                    mode.size.width, mode.size.height,
-                                    mode.refresh_rate)
             glfw.show_window(self._win)
         else:
-            w, h = self._windowed_size
-            glfw.set_window_monitor(self._win, None, 0, 0, w, h, 0)
             glfw.hide_window(self._win)
 
     def _loop(self):
@@ -1982,8 +2150,8 @@ class BoostLayerApp:
 
         self.root = ctk.CTk()
         self.root.title("BoostLayer")
-        self.root.geometry("520x660")
-        self.root.resizable(False, False)
+        self.root.geometry("540x720")
+        self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
 
         # Window/taskbar icon.
@@ -2124,15 +2292,30 @@ class BoostLayerApp:
         ctk.CTkLabel(row, text=self._t("capture_target")).pack(side="left")
         self._target_by_label = {
             self._t("fullscreen"): "fullscreen",
-            self._t("active_window"): "window",
+            self._t("window"): "window",
         }
         self.target_menu = ctk.CTkOptionMenu(
-            row, values=[self._t("fullscreen"), self._t("active_window")],
+            row, values=[self._t("fullscreen"), self._t("window")],
             width=150, command=self._on_target)
-        target_display = ("active_window" if st.capture_target == "window"
+        target_display = ("window" if st.capture_target == "window"
                           else "fullscreen")
         self.target_menu.set(self._t(target_display))
         self.target_menu.pack(side="right")
+
+        # Target window (XComposite) selector + refresh.
+        win_row = ctk.CTkFrame(t, fg_color="transparent")
+        win_row.pack(fill="x", **pad)
+        ctk.CTkLabel(win_row, text=self._t("target_window")).pack(side="left")
+        self.refresh_btn = ctk.CTkButton(
+            win_row, text=self._t("refresh"), width=70,
+            command=self._refresh_windows)
+        self.refresh_btn.pack(side="right", padx=(0, 6))
+        self._windows = []
+        self._win_by_label = {}
+        self.window_menu = ctk.CTkOptionMenu(
+            win_row, values=[], width=200, command=self._on_window)
+        self.window_menu.pack(side="right")
+        self._refresh_windows()
 
         ctk.CTkLabel(t, text=self._t("capture_note"), wraplength=460,
                      justify="left", font=ctk.CTkFont(size=11),
@@ -2222,6 +2405,38 @@ class BoostLayerApp:
     def _on_target(self, value):
         self.state.update(
             capture_target=self._target_by_label.get(value, "fullscreen"))
+
+    def _refresh_windows(self):
+        wins = list_windows()
+        self._windows = wins
+        self._win_by_label = {}
+        labels = []
+        for wid, title, w, h in wins:
+            label = "%s  (%dx%d)" % (title, w, h)
+            if len(label) > 42:
+                label = label[:39] + "..."
+            labels.append(label)
+            self._win_by_label[label] = wid
+        if not labels:
+            labels = [self._t("window")]
+        self.window_menu.configure(values=labels)
+        cur = self.state.capture_window_id
+        selected = False
+        if cur is not None:
+            for lab, wid in self._win_by_label.items():
+                if wid == cur:
+                    self.window_menu.set(lab)
+                    selected = True
+                    break
+        if not selected:
+            self.window_menu.set(labels[0])
+
+    def _on_window(self, label):
+        wid = self._win_by_label.get(label)
+        if wid is None:
+            return
+        self.state.update(capture_target="window", capture_window_id=wid)
+        self.target_menu.set(self._t("window"))
 
     def _on_osd(self):
         self.state.update(osd_enabled=bool(self.osd_switch.get()))
