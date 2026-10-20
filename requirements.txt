@@ -1,0 +1,11 @@
+# BoostLayer — minimal, optimised runtime dependencies.
+# GUI / rendering / capture / input / telemetry only. No heavy frameworks.
+customtkinter>=5.2.0
+PyOpenGL>=3.1.6
+PyOpenGL_accelerate>=3.1.6
+glfw>=2.5.0
+mss>=9.0.0
+pynput>=1.7.6
+evdev>=1.6.0
+numpy>=1.24.0
+psutil>=5.9.0

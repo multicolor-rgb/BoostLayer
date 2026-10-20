@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=BoostLayer
+GenericName=Scaling Overlay
+Comment=Ultra-lean Linux scaling overlay with frame generation (Lossless Scaling clone)
+Exec=boostlayer
+Icon=boostlayer
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=upscaling;FSR;frame generation;OSD;scaling;
+StartupWMClass=BoostLayer

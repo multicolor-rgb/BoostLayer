@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Build artefacts (PyInstaller / packages) ---
+build/
+dist/
+*.spec
+*.AppImage
+*.deb
+*.tar.xz
+*.zip
+
+# --- Downloaded tools ---
+tools/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
