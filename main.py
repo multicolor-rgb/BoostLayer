@@ -1170,13 +1170,20 @@ def list_windows():
             attrs = w.get_attributes()
         except Exception:
             continue
-        if attrs.map_state != X.IsViewable:
-            continue
-        if geo.width < 60 or geo.height < 60:
-            continue
+        is_override = bool(attrs.override_redirect)
+        if is_override:
+            # Override-redirect windows (Proton/Wine games, fullscreen) have no
+            # WM title — skip tiny compositor internals, keep game-sized ones
+            # even if currently unmapped.
+            if geo.width < 320 or geo.height < 240:
+                continue
+        else:
+            if attrs.map_state != X.IsViewable:
+                continue
+            if geo.width < 60 or geo.height < 60:
+                continue
         if not name:
-            # Window has no title/class — still list it with a fallback label.
-            name = "Window 0x%x" % int(w.id)
+            name = "Window %dx%d" % (geo.width, geo.height)
         windows.append((int(w.id), name, geo.width, geo.height))
     try:
         d.close()
