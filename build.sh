@@ -12,7 +12,7 @@ set -euo pipefail
 
 APP_NAME="boostlayer"
 APP_TITLE="BoostLayer"
-VERSION="1.0.0"
+VERSION="1.0.1"
 ARCH="$(uname -m)"                 # x86_64 | aarch64 | armv7l | i686 | ...
 
 # ---------------------------------------------------------------------------

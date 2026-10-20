@@ -13,7 +13,8 @@ binary, `.deb` and `.AppImage`.
 - **Scaling modes** — AMD FSR 1.0 (EASU + RCAS), integer, nearest and bicubic.
 - **Frame generation** — motion-adaptive interpolation in GLSL.
 - **Capture targets**
-  - *Fullscreen* — a whole monitor (mss).
+  - *Fullscreen* — the topmost window on the selected monitor (captured
+    off-screen, so the overlay can never capture itself — no mirror feedback).
   - *Active Window* — follows the focused window automatically.
   - *Window* — a window picked from the list or by clicking it.
 - **Window picker** — `Click window` hides the GUI, shows a crosshair and
@@ -22,14 +23,20 @@ binary, `.deb` and `.AppImage`.
 - **Multi-monitor** — separate capture monitor and output monitor selectors.
 - **Always on top** — the overlay re-asserts `_NET_WM_STATE_ABOVE` once per
   second without stealing keyboard focus, so fullscreen games cannot bury it.
+- **Click-through** — an empty X11 input shape is applied to the overlay, so
+  clicks and key presses reach the game/desktop underneath instead of being
+  swallowed by the full-screen window.
+- **Single instance** — a second launch exits immediately; stacked overlays and
+  duplicate capture threads cannot pile up and stall the desktop.
 - **Performance OSD** — capture FPS, render FPS, CPU, GPU, RAM.
 - **System tray** — closing the window hides BoostLayer to the tray
   (AppIndicator/StatusNotifier, with a legacy XEmbed fallback). Tray menu:
   *Show* / *Quit*. Without a tray the window is minimised instead.
 - **Global hotkey** — `Ctrl+Alt+S` toggles scaling (X11 and Wayland).
 - **Languages** — English, German, Polish (switchable at runtime).
-- **Low overhead** — reused textures (`glTexSubImage2D`), no per-frame
-  allocations, no GC pauses in the hot loops.
+- **Low overhead** — shared-memory window capture (`XShmGetImage`, ~5 ms per
+  1080p frame), reused textures (`glTexSubImage2D`), no per-frame allocations,
+  no GC pauses in the hot loops.
 
 ## Requirements
 
@@ -42,11 +49,11 @@ binary, `.deb` and `.AppImage`.
 
 ```bash
 # Debian / Ubuntu
-sudo apt install ./boostlayer_1.0.0_amd64.deb
+sudo apt install ./boostlayer_1.0.1_amd64.deb
 
 # AppImage (no installation)
-chmod +x BoostLayer-1.0.0-x86_64.AppImage
-./BoostLayer-1.0.0-x86_64.AppImage
+chmod +x BoostLayer-1.0.1-x86_64.AppImage
+./BoostLayer-1.0.1-x86_64.AppImage
 ```
 
 Or run the portable single binary: `./boostlayer`.
@@ -73,8 +80,13 @@ not kicked out of its own display mode.
   virtual desktop (an unnamed override-redirect window). Use `Click window` to
   pick it directly, or run the game in windowed/borderless mode.
 - **Black overlay** — the selected window cannot be composited (e.g. a
-  compositor-internal window). Pick another window; BoostLayer falls back to a
-  fullscreen grab when compositing fails.
+  compositor-internal window). Pick another window; a fullscreen grab is used
+  only when the overlay is not covering the captured monitor.
+- **Duplicated panel / frozen desktop** — this was caused by capturing the
+  monitor (and therefore the overlay itself). Current builds capture windows
+  off-screen and refuse monitor grabs while the overlay is visible, so this
+  cannot happen; press `Ctrl+Alt+S` to hide the overlay if an old build
+  misbehaves.
 - **No tray icon** — install `gir1.2-ayatanaappindicator3-0.1`; otherwise the
   window is minimised on close instead of hidden.
 - **Logs** — BoostLayer writes a small log to

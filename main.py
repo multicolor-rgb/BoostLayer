@@ -71,7 +71,7 @@ except ImportError:  # pragma: no cover
 # Constants
 # ---------------------------------------------------------------------------
 APP_NAME = "BoostLayer"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 DEFAULT_HOTKEY = "<ctrl>+<alt>+s"
 
 # Persistent log (especially useful for the packaged GUI build, where stdout is
@@ -91,6 +91,36 @@ def _log(msg):
             fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
     except Exception:
         pass
+
+
+def _acquire_single_instance():
+    """Take an exclusive lock so only one BoostLayer instance can run.
+
+    Returns an open file object on success, ``False`` when another instance
+    holds the lock, or ``None`` when locking is not available.  The lock is
+    released by the kernel when the process exits (even after a crash)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    path = os.path.join(base, "boostlayer-%d.lock" % os.getuid())
+    try:
+        fh = open(path, "w")
+    except Exception:
+        return None
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    try:
+        fh.write(str(os.getpid()))
+        fh.flush()
+    except Exception:
+        pass
+    return fh
+
 
 
 # Scaling-mode identifiers are stable ASCII keys; display names are localised.
@@ -131,7 +161,7 @@ TRANSLATIONS = {
         "target_window": "Target window",
         "refresh": "Refresh",
         "select_window": "Click window",
-        "capture_note": "Window mode captures the selected window via XComposite (works even when covered by the overlay). Run the game in windowed mode for best results.",
+        "capture_note": "Window captures the selected window, Active follows focus, Fullscreen grabs the topmost window on the selected monitor. BoostLayer never captures its own overlay (no mirror loop).",
         "performance_osd": "Performance OSD",
         "displayed_metrics": "Displayed metrics",
         "metric_fps": "FPS (Capture & Render)",
@@ -180,7 +210,7 @@ TRANSLATIONS = {
         "target_window": "Zielfenster",
         "refresh": "Aktualisieren",
         "select_window": "Fenster klicken",
-        "capture_note": "Fenstermodus erfasst das gewählte Fenster über XComposite (funktioniert auch, wenn es vom Overlay verdeckt wird). Spiel im Fenstermodus starten.",
+        "capture_note": "Fenster erfasst das gewählte Fenster, Aktiv folgt dem Fokus, Vollbild nimmt das oberste Fenster am gewählten Monitor. BoostLayer erfasst nie sein eigenes Overlay (keine Spiegel-Schleife).",
         "performance_osd": "Performance-OSD",
         "displayed_metrics": "Angezeigte Metriken",
         "metric_fps": "FPS (Aufnahme & Render)",
@@ -229,7 +259,7 @@ TRANSLATIONS = {
         "target_window": "Okno docelowe",
         "refresh": "Odśwież",
         "select_window": "Kliknij okno",
-        "capture_note": "Tryb Okno przechwytuje wybrane okno przez XComposite (działa też, gdy jest zasłonięte overlayem). Uruchom grę w trybie okienkowym.",
+        "capture_note": "Okno przechwytuje wybrane okno, Aktywne podąża za fokusem, Pełny ekran bierze najwyższe okno na wybranym monitorze. BoostLayer nigdy nie przechwytuje własnego overlayu (brak pętli lustra).",
         "performance_osd": "OSD wydajności",
         "displayed_metrics": "Wyświetlane metryki",
         "metric_fps": "FPS (Przechwyt i render)",
@@ -903,10 +933,14 @@ class AppState:
         self.custom_mult = 1.5
         self.fg_enabled = False
         self.capture_delay_ms = 0
-        self.capture_target = "fullscreen"   # "fullscreen" | "window"
+        self.capture_target = "active"       # "fullscreen" | "active" | "window"
         self.capture_window_id = None        # X11 window id for XComposite
         self.capture_monitor = 1             # mss monitor index (1 = primary)
         self.output_monitor = 0              # GLFW monitor index (0 = primary)
+        # Screen rect (x, y, w, h) currently covered by the overlay, written by
+        # the renderer.  Used to refuse full-screen grabs that would capture
+        # the overlay itself (mirror feedback loop).
+        self.overlay_rect = None
         self.osd_enabled = True
         self.osd_show_fps = True
         self.osd_show_cpu = True
@@ -1329,7 +1363,7 @@ def _find_client_window(win, depth=0):
 
 def select_window_by_click():
     """Grab the pointer, let the user click a window, and return its client
-    window id (or None).  Right-click cancels; gives up after 30 s."""
+    window id (or None).  Right-click cancels; gives up after 15 s."""
     import select
     try:
         from Xlib import display, X
@@ -1356,7 +1390,7 @@ def select_window_by_click():
         root.grab_pointer(True, X.ButtonPressMask, X.GrabModeAsync,
                           X.GrabModeAsync, X.NONE, X.NONE, X.CurrentTime)
         d.sync()
-        deadline = time.time() + 30.0
+        deadline = time.time() + 15.0
         while time.time() < deadline:
             if not d.pending_events():
                 select.select([d.fileno()], [], [], 0.1)
@@ -1432,113 +1466,470 @@ def _wine_exe_names():
     return sorted(names)
 
 
+# ---------------------------------------------------------------------------
+# Fast X11 window capture (ctypes: libX11 / libXext / libXcomposite)
+#
+# python-xlib transfers XGetImage replies through its pure-Python socket
+# layer, which costs ~60 ms for a 1080p frame.  XShmGetImage writes the pixels
+# straight into shared memory (~3 ms), which is what keeps the overlay smooth.
+# ---------------------------------------------------------------------------
+
+_ZPIXMAP = 2
+_ALL_PLANES = 0xFFFFFFFF
+
+_X11_LIBS = None          # (libX11, libXext, libXcomposite, libc) or False
+_X11_ERROR = [0]          # last X error code seen by the handler
+_X11_PREV_HANDLER = None
+
+
+class _XImageStruct(ctypes.Structure):
+    _fields_ = [
+        ("width", ctypes.c_int),
+        ("height", ctypes.c_int),
+        ("xoffset", ctypes.c_int),
+        ("format", ctypes.c_int),
+        ("data", ctypes.c_void_p),
+        ("byte_order", ctypes.c_int),
+        ("bitmap_unit", ctypes.c_int),
+        ("bitmap_bit_order", ctypes.c_int),
+        ("bitmap_pad", ctypes.c_int),
+        ("depth", ctypes.c_int),
+        ("bytes_per_line", ctypes.c_int),
+        ("bits_per_pixel", ctypes.c_int),
+        ("red_mask", ctypes.c_ulong),
+        ("green_mask", ctypes.c_ulong),
+        ("blue_mask", ctypes.c_ulong),
+    ]
+
+
+class _XShmSegmentInfo(ctypes.Structure):
+    _fields_ = [
+        ("shmseg", ctypes.c_ulong),
+        ("shmid", ctypes.c_int),
+        ("shmaddr", ctypes.c_void_p),
+        ("readOnly", ctypes.c_int),
+    ]
+
+
+class _XWindowAttributes(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("width", ctypes.c_int),
+        ("height", ctypes.c_int),
+        ("border_width", ctypes.c_int),
+        ("depth", ctypes.c_int),
+        ("visual", ctypes.c_void_p),
+        ("root", ctypes.c_ulong),
+        ("class_", ctypes.c_int),
+        ("bit_gravity", ctypes.c_int),
+        ("win_gravity", ctypes.c_int),
+        ("backing_store", ctypes.c_int),
+        ("backing_planes", ctypes.c_ulong),
+        ("backing_pixel", ctypes.c_ulong),
+        ("save_under", ctypes.c_int),
+        ("colormap", ctypes.c_ulong),
+        ("map_installed", ctypes.c_int),
+        ("map_state", ctypes.c_int),
+        ("all_event_masks", ctypes.c_long),
+        ("your_event_mask", ctypes.c_long),
+        ("do_not_propagate_mask", ctypes.c_long),
+        ("override_redirect", ctypes.c_int),
+        ("screen", ctypes.c_void_p),
+    ]
+
+
+class _XErrorEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("display", ctypes.c_void_p),
+        ("resourceid", ctypes.c_ulong),
+        ("serial", ctypes.c_ulong),
+        ("error_code", ctypes.c_ubyte),
+        ("request_code", ctypes.c_ubyte),
+        ("minor_code", ctypes.c_ubyte),
+    ]
+
+
+_XErrorHandlerType = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                      ctypes.POINTER(_XErrorEvent))
+
+
+@_XErrorHandlerType
+def _x11_error_handler(dpy, event):
+    """Record async X errors instead of letting Xlib abort the process."""
+    try:
+        _X11_ERROR[0] = event.contents.error_code
+    except Exception:
+        _X11_ERROR[0] = -1
+    prev = _X11_PREV_HANDLER
+    if prev is not None:
+        try:
+            return prev(dpy, event)
+        except Exception:
+            return 0
+    return 0
+
+
+def _x11_load():
+    """Load and prototype the X11 libraries once.  True on success."""
+    global _X11_LIBS, _X11_PREV_HANDLER
+    if _X11_LIBS is not None:
+        return bool(_X11_LIBS)
+    try:
+        import ctypes.util
+        def _lib(name, fallback):
+            return ctypes.CDLL(ctypes.util.find_library(name) or fallback)
+        libx11 = _lib("X11", "libX11.so.6")
+        libxext = _lib("Xext", "libXext.so.6")
+        libxc = _lib("Xcomposite", "libXcomposite.so.1")
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
+                           use_errno=True)
+    except OSError as e:
+        _log("X11 libraries unavailable: %r" % (e,))
+        _X11_LIBS = False
+        return False
+
+    libx11.XOpenDisplay.restype = ctypes.c_void_p
+    libx11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    libx11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    libx11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    libx11.XSetErrorHandler.restype = ctypes.c_void_p
+    libx11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+    libx11.XGetWindowAttributes.restype = ctypes.c_int
+    libx11.XGetWindowAttributes.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_XWindowAttributes)]
+    libx11.XGetImage.restype = ctypes.c_void_p
+    libx11.XGetImage.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+        ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_int]
+    libx11.XDestroyImage.argtypes = [ctypes.c_void_p]
+    libx11.XFreePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+
+    libxc.XCompositeRedirectWindow.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int]
+    libxc.XCompositeUnredirectWindow.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int]
+    libxc.XCompositeNameWindowPixmap.restype = ctypes.c_ulong
+    libxc.XCompositeNameWindowPixmap.argtypes = [ctypes.c_void_p,
+                                                 ctypes.c_ulong]
+
+    libxext.XShmQueryExtension.restype = ctypes.c_int
+    libxext.XShmQueryExtension.argtypes = [ctypes.c_void_p]
+    libxext.XShmCreateImage.restype = ctypes.c_void_p
+    libxext.XShmCreateImage.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_int,
+        ctypes.c_void_p, ctypes.POINTER(_XShmSegmentInfo),
+        ctypes.c_uint, ctypes.c_uint]
+    libxext.XShmAttach.restype = ctypes.c_int
+    libxext.XShmAttach.argtypes = [ctypes.c_void_p,
+                                   ctypes.POINTER(_XShmSegmentInfo)]
+    libxext.XShmDetach.restype = ctypes.c_int
+    libxext.XShmDetach.argtypes = [ctypes.c_void_p,
+                                   ctypes.POINTER(_XShmSegmentInfo)]
+    libxext.XShmGetImage.restype = ctypes.c_int
+    libxext.XShmGetImage.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+        ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+
+    libc.shmget.restype = ctypes.c_int
+    libc.shmget.argtypes = [ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
+    libc.shmat.restype = ctypes.c_void_p
+    libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    libc.shmdt.argtypes = [ctypes.c_void_p]
+    libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+
+    prev = libx11.XSetErrorHandler(
+        ctypes.cast(_x11_error_handler, ctypes.c_void_p))
+    if prev:
+        _X11_PREV_HANDLER = ctypes.cast(prev, _XErrorHandlerType)
+
+    _X11_LIBS = (libx11, libxext, libxc, libc)
+    return True
+
+
 class XCompositeCapture:
-    """Capture a specific X11 window via the Composite extension.
+    """Capture a specific X11 window through the Composite extension.
 
     XCompositeRedirectWindow keeps the window's content in an off-screen
-    buffer, so it can be captured even when occluded by the overlay."""
+    buffer, so it can be read even when the always-on-top overlay covers it.
+    Pixels are pulled with MIT-SHM (XShmGetImage) and converted in place into
+    a reused BGRA buffer, so steady-state capture allocates nothing."""
 
     def __init__(self, window_id):
-        from Xlib import display, X
-        from Xlib.ext import composite
-        self._X = X
         self.window_id = int(window_id)
-        # Default channel order (little-endian TrueColor: BGRX/BGRA).
+        self._ok = False
+        self._dpy = None
+        self._pixmap = 0
+        self._shm_img = None
+        self._shm = None
+        self._shm_id = -1
+        self._shm_addr = None
+        self._shm_size = 0
+        self._shm_bpl = 0
+        self._shm_ok = False
+        self._w = 0
+        self._h = 0
+        self._out = None
         self._bpp = 4
         self._r_byte = 2
         self._g_byte = 1
         self._b_byte = 0
-        try:
-            self._d = display.Display()
-        except Exception:
-            self._d = None
-            self._ok = False
+        self._fast = True
+
+        if not _x11_load():
             return
-        self._win = self._d.create_resource_object("window", self.window_id)
-        self._ok = False
+        libx11 = _X11_LIBS[0]
         try:
-            self._win.composite_redirect_window(composite.RedirectAutomatic)
-            self._d.sync()
-            self._ok = True
-            self._read_visual_format()
+            dpy = libx11.XOpenDisplay(None)
+        except Exception:
+            dpy = None
+        if not dpy:
+            _log("XComposite: cannot open X display")
+            return
+        self._dpy = dpy
+        if not self._redirect():
+            self.release()
+
+    # -- setup ------------------------------------------------------------
+    def _redirect(self):
+        libx11, _xext, libxc, _libc = _X11_LIBS
+        _X11_ERROR[0] = 0
+        try:
+            libxc.XCompositeRedirectWindow(self._dpy, self.window_id, 0)
+            libx11.XSync(self._dpy, 0)
         except Exception as e:
-            print("[BoostLayer] XComposite redirect failed:", e)
+            _log("XComposite redirect failed for %d: %r"
+                 % (self.window_id, e))
+            return False
+        if _X11_ERROR[0]:
+            _log("XComposite redirect refused for window %d (X error %d)"
+                 % (self.window_id, _X11_ERROR[0]))
+            return False
+        attrs = _XWindowAttributes()
+        _X11_ERROR[0] = 0
+        if not libx11.XGetWindowAttributes(self._dpy, self.window_id,
+                                           ctypes.byref(attrs)):
+            return False
+        if attrs.width <= 0 or attrs.height <= 0:
+            return False
+        self._w, self._h = int(attrs.width), int(attrs.height)
+        if not self._make_target():
+            return False
+        self._ok = True
+        return True
 
-    def _read_visual_format(self):
-        """Determine bytes-per-pixel and channel byte order from the visual."""
+    def _make_target(self):
+        """(Re)name the window pixmap and (re)allocate the capture buffers."""
+        libx11, _xext, libxc, _libc = _X11_LIBS
+        self._free_pixmap()
+        self._free_shm()
+        _X11_ERROR[0] = 0
+        pixmap = libxc.XCompositeNameWindowPixmap(self._dpy, self.window_id)
+        if _X11_ERROR[0] or not pixmap:
+            return False
+        self._pixmap = int(pixmap)
+        self._out = np.empty((self._h, self._w, 4), dtype=np.uint8)
+        self._setup_shm()
+        return True
+
+    def _setup_shm(self):
+        libx11, libxext, _libxc, libc = _X11_LIBS
         try:
-            attrs = self._win.get_attributes()
-            vis_id = attrs.visual
-            for depth in self._d.screen().allowed_depths:
-                for v in depth.visuals:
-                    if v.visual_id == vis_id:
-                        self._bpp = max(1, depth.depth // 8)
-                        self._r_byte = _mask_to_byte(v.red_mask)
-                        self._g_byte = _mask_to_byte(v.green_mask)
-                        self._b_byte = _mask_to_byte(v.blue_mask)
-                        return
-        except Exception:
-            pass
+            if not libxext.XShmQueryExtension(self._dpy):
+                return False
+            attrs = _XWindowAttributes()
+            _X11_ERROR[0] = 0
+            if not libx11.XGetWindowAttributes(self._dpy, self.window_id,
+                                               ctypes.byref(attrs)):
+                return False
+            shm = _XShmSegmentInfo()
+            img = libxext.XShmCreateImage(
+                self._dpy, attrs.visual, attrs.depth, _ZPIXMAP, None,
+                ctypes.byref(shm), self._w, self._h)
+            if not img:
+                return False
+            xi = ctypes.cast(img, ctypes.POINTER(_XImageStruct)).contents
+            size = int(xi.bytes_per_line) * int(xi.height)
+            if size <= 0:
+                libx11.XDestroyImage(img)
+                return False
+            shmid = libc.shmget(0, size, 0o600 | 0o1000)   # IPC_PRIVATE|CREAT
+            if shmid < 0:
+                libx11.XDestroyImage(img)
+                return False
+            addr = libc.shmat(shmid, None, 0)
+            if not addr or addr == ctypes.c_void_p(-1).value:
+                libc.shmctl(shmid, 0, None)
+                libx11.XDestroyImage(img)
+                return False
+            shm.shmid = shmid
+            shm.shmaddr = addr
+            shm.readOnly = 0
+            xi.data = addr
+            _X11_ERROR[0] = 0
+            if not libxext.XShmAttach(self._dpy, ctypes.byref(shm)):
+                libc.shmdt(addr)
+                libc.shmctl(shmid, 0, None)
+                libx11.XDestroyImage(img)
+                return False
+            libx11.XSync(self._dpy, 0)
+            if _X11_ERROR[0]:
+                libxext.XShmDetach(self._dpy, ctypes.byref(shm))
+                libc.shmdt(addr)
+                libc.shmctl(shmid, 0, None)
+                libx11.XDestroyImage(img)
+                return False
+            self._shm = shm
+            self._shm_img = img
+            self._shm_id = shmid
+            self._shm_addr = addr
+            self._shm_size = size
+            self._shm_bpl = int(xi.bytes_per_line)
+            self._shm_ok = True
+            self._read_format(xi)
+            return True
+        except Exception as e:
+            _log("XShm setup failed: %r" % (e,))
+            return False
 
-    def _to_bgra(self, image, w, h):
-        bpp = self._bpp
-        data = image.data
-        if isinstance(data, str):
-            data = data.encode("latin-1")
-        raw = np.frombuffer(data, dtype=np.uint8)
-        if raw.size < w * bpp * h:
-            return None
-        bpl = raw.size // h if h > 0 else 0
-        if bpl < w * bpp:
-            return None
-        raw = raw.reshape(h, bpl)[:, : w * bpp].reshape(h, w, bpp).copy()
-        rb = min(self._r_byte, bpp - 1)
-        gb = min(self._g_byte, bpp - 1)
-        bb = min(self._b_byte, bpp - 1)
-        bgra = np.empty((h, w, 4), dtype=np.uint8)
-        bgra[:, :, 0] = raw[:, :, bb]
-        bgra[:, :, 1] = raw[:, :, gb]
-        bgra[:, :, 2] = raw[:, :, rb]
-        bgra[:, :, 3] = 255
-        return bgra
+    def _read_format(self, xi):
+        self._bpp = max(1, int(xi.bits_per_pixel) // 8)
+        self._r_byte = _mask_to_byte(xi.red_mask)
+        self._g_byte = _mask_to_byte(xi.green_mask)
+        self._b_byte = _mask_to_byte(xi.blue_mask)
+        self._fast = (self._bpp == 4 and self._r_byte == 2 and
+                      self._g_byte == 1 and self._b_byte == 0)
 
+    # -- grabbing ---------------------------------------------------------
     def grab(self):
-        if not self._ok or self._d is None:
+        if not self._ok or not self._dpy:
+            return None
+        libx11 = _X11_LIBS[0]
+        # Window resized? Then the named pixmap and the SHM image are stale.
+        attrs = _XWindowAttributes()
+        _X11_ERROR[0] = 0
+        if not libx11.XGetWindowAttributes(self._dpy, self.window_id,
+                                           ctypes.byref(attrs)):
+            return None
+        if attrs.width != self._w or attrs.height != self._h:
+            if attrs.width <= 0 or attrs.height <= 0:
+                return None
+            self._w, self._h = int(attrs.width), int(attrs.height)
+            if not self._make_target():
+                return None
+        return self._read()
+
+    def _read(self):
+        libx11, libxext, _libxc, _libc = _X11_LIBS
+        if self._shm_ok:
+            _X11_ERROR[0] = 0
+            ok = libxext.XShmGetImage(self._dpy, self._pixmap, self._shm_img,
+                                      0, 0, _ALL_PLANES)
+            if ok and not _X11_ERROR[0]:
+                buf = (ctypes.c_ubyte * self._shm_size).from_address(
+                    self._shm_addr)
+                raw = np.frombuffer(buf, dtype=np.uint8)
+                return self._convert(raw, self._h, self._shm_bpl)
+            # SHM stopped working (segment detached, window gone): fall back.
+            _log("XShmGetImage failed, using XGetImage fallback")
+            self._free_shm()
+        _X11_ERROR[0] = 0
+        ptr = libx11.XGetImage(self._dpy, self._pixmap, 0, 0, self._w,
+                               self._h, _ALL_PLANES, _ZPIXMAP)
+        if not ptr:
             return None
         try:
-            geo = self._win.get_geometry()
-        except Exception:
+            xi = ctypes.cast(ptr, ctypes.POINTER(_XImageStruct)).contents
+            size = int(xi.bytes_per_line) * int(xi.height)
+            if size <= 0:
+                return None
+            self._read_format(xi)
+            buf = (ctypes.c_ubyte * size).from_address(xi.data)
+            raw = np.frombuffer(buf, dtype=np.uint8)
+            return self._convert(raw, int(xi.height), int(xi.bytes_per_line))
+        finally:
+            libx11.XDestroyImage(ptr)
+
+    def _convert(self, raw, h, bpl):
+        w = self._w
+        out = self._out
+        if out is None or out.shape[0] != h or out.shape[1] != w:
+            out = np.empty((h, w, 4), dtype=np.uint8)
+            self._out = out
+        bpp = self._bpp
+        if bpl < w * bpp or raw.size < bpl * h:
             return None
-        w, h = geo.width, geo.height
-        if w <= 0 or h <= 0:
-            return None
+        if self._fast:
+            src = raw.reshape(h, bpl)[:, :w * 4].reshape(h, w, 4)
+            np.copyto(out, src)
+        else:
+            src = raw.reshape(h, bpl)[:, :w * bpp].reshape(h, w, bpp)
+            bb = min(self._b_byte, bpp - 1)
+            gb = min(self._g_byte, bpp - 1)
+            rb = min(self._r_byte, bpp - 1)
+            out[:, :, 0] = src[:, :, bb]
+            out[:, :, 1] = src[:, :, gb]
+            out[:, :, 2] = src[:, :, rb]
+        out[:, :, 3] = 255
+        return out
+
+    # -- teardown ---------------------------------------------------------
+    def _free_shm(self):
+        if self._shm_img is None and self._shm is None:
+            return
+        libx11, libxext, _libxc, libc = _X11_LIBS
         try:
-            pixmap = self._win.composite_name_window_pixmap()
-        except Exception:
-            return None
-        image = None
-        try:
-            image = pixmap.get_image(0, 0, w, h, self._X.ZPixmap, 0xFFFFFFFF)
-        except Exception:
-            image = None
-        try:
-            pixmap.free()
+            if self._shm is not None and self._dpy:
+                libxext.XShmDetach(self._dpy, ctypes.byref(self._shm))
         except Exception:
             pass
-        if image is None:
-            return None
-        return self._to_bgra(image, w, h)
+        try:
+            if self._shm_img is not None:
+                libx11.XDestroyImage(self._shm_img)
+        except Exception:
+            pass
+        try:
+            if self._shm_addr:
+                libc.shmdt(self._shm_addr)
+        except Exception:
+            pass
+        try:
+            if self._shm_id >= 0:
+                libc.shmctl(self._shm_id, 0, None)   # IPC_RMID
+        except Exception:
+            pass
+        self._shm_img = None
+        self._shm = None
+        self._shm_addr = None
+        self._shm_id = -1
+        self._shm_size = 0
+        self._shm_ok = False
+
+    def _free_pixmap(self):
+        if self._pixmap and self._dpy:
+            try:
+                _X11_LIBS[0].XFreePixmap(self._dpy, self._pixmap)
+            except Exception:
+                pass
+        self._pixmap = 0
 
     def release(self):
-        try:
-            self._win.composite_unredirect_window(0)
-        except Exception:
-            pass
-        try:
-            self._d.close()
-        except Exception:
-            pass
         self._ok = False
+        self._free_shm()
+        self._free_pixmap()
+        if self._dpy:
+            try:
+                _X11_LIBS[2].XCompositeUnredirectWindow(self._dpy,
+                                                        self.window_id, 0)
+                _X11_LIBS[0].XSync(self._dpy, 0)
+            except Exception:
+                pass
+            try:
+                _X11_LIBS[0].XCloseDisplay(self._dpy)
+            except Exception:
+                pass
+            self._dpy = None
 
 
 class CaptureThread(threading.Thread):
@@ -1552,6 +1943,10 @@ class CaptureThread(threading.Thread):
         self._xcomp = None
         self._active_win_id = None
         self._last_active_refresh = 0.0
+        self._full_win_id = None
+        self._last_full_refresh = 0.0
+        self._bad_windows = set()
+        self._mss_warned = False
         self._seq = 0
         self._last_window_refresh = 0.0
         self._window_region = None
@@ -1571,32 +1966,211 @@ class CaptureThread(threading.Thread):
         return True
 
     def _grab_frame(self):
-        """Dispatch to the appropriate capture backend."""
+        """Dispatch to the appropriate capture backend.
+
+        On X11 every target ultimately captures a *window* off-screen via
+        XComposite.  Grabbing the monitor while the always-on-top overlay is
+        visible would capture the overlay itself, producing an endless mirror
+        (duplicated panel, runaway GPU load) — so ``mss`` is only used when the
+        overlay is provably not on the captured monitor.
+        """
         target = self.state.capture_target
         win_id = self.state.capture_window_id
-        if target in ("window", "active"):
-            if target == "active":
-                now = time.time()
-                if now - self._last_active_refresh > 0.5:
-                    self._last_active_refresh = now
-                    new_id = active_window_id()
-                    # Ignore BoostLayer's own windows (the GUI or the overlay),
-                    # otherwise we would capture ourselves and show a mirror.
-                    if new_id and not self._is_own_window(new_id):
-                        self._active_win_id = new_id
-                win_id = self._active_win_id
+
+        if target == "window":
             if win_id:
-                arr = self._grab_xcomp(win_id)
-                if arr is None and self.display == "wayland":
-                    arr = self._grab_grim()
+                arr = self._grab_window(win_id)
                 if arr is not None:
                     return arr
-                # Last resort: if the window cannot be composited (some
-                # override-redirect/compositor-internal windows), fall back to
-                # a full-screen grab instead of showing a black overlay.
+            return self._grab_safe_mss()
+
+        if target == "active":
+            now = time.time()
+            if now - self._last_active_refresh > 0.5:
+                self._last_active_refresh = now
+                new_id = active_window_id()
+                # Ignore BoostLayer's own windows (the GUI or the overlay),
+                # otherwise we would capture ourselves and show a mirror.
+                if new_id and not self._is_own_window(new_id):
+                    self._active_win_id = new_id
+            if self._active_win_id:
+                arr = self._grab_window(self._active_win_id)
+                if arr is not None:
+                    return arr
+                self._active_win_id = None
+            # Nothing foreign has been focused yet (e.g. scaling was started
+            # from the GUI): capture the topmost window on the monitor as a
+            # safe stand-in instead of giving up.
+            arr = self._grab_topmost()
+            if arr is not None:
+                return arr
+            return self._grab_safe_mss()
+
+        # "fullscreen": capture the topmost window on the selected monitor.
+        arr = self._grab_topmost()
+        if arr is not None:
+            return arr
+        if self.display == "x11":
+            return self._grab_safe_mss()
+
+        arr = self._grab_grim()
+        if arr is not None:
+            return arr
+        return self._grab_safe_mss()
+
+    def _grab_topmost(self):
+        """Topmost window on the capture monitor (X11 only, never the overlay)."""
+        if self.display != "x11":
+            return None
+        now = time.time()
+        if not self._full_win_id or now - self._last_full_refresh > 1.0:
+            self._last_full_refresh = now
+            self._full_win_id = self._topmost_window_on_monitor()
+        if not self._full_win_id:
+            return None
+        arr = self._grab_window(self._full_win_id)
+        if arr is not None:
+            return arr
+        # Uncompositable window — never try it again.
+        if len(self._bad_windows) < 64:
+            self._bad_windows.add(self._full_win_id)
+        self._full_win_id = None
+        return None
+
+    def _grab_window(self, win_id):
+        """Capture a window via XComposite (Wayland: fall back to grim)."""
+        arr = self._grab_xcomp(win_id)
+        if arr is None and self.display == "wayland":
+            arr = self._grab_grim()
+        return arr
+
+    # -- monitor geometry / feedback-loop protection -----------------------
+    def _capture_rect(self):
+        """The mss monitor rect that would be captured by full-screen mode."""
         if self._sct is None:
             return None
+        try:
+            mons = self._sct.monitors
+            idx = max(1, min(int(self.state.capture_monitor), len(mons) - 1))
+            return mons[idx]
+        except Exception:
+            return None
+
+    def _overlay_covers_capture(self):
+        """True when the overlay sits on the monitor full-screen mode would
+        grab — i.e. when using mss would capture the overlay itself."""
+        rect = self._capture_rect()
+        ov = getattr(self.state, "overlay_rect", None)
+        if not ov:
+            return False
+        if not rect:
+            # No monitor geometry (typical on Wayland): a full-output grab
+            # inevitably includes the visible overlay.
+            return True
+        try:
+            rx, ry, rw, rh = rect["left"], rect["top"], rect["width"], rect["height"]
+            ox, oy, ow, oh = ov
+        except Exception:
+            return False
+        ix = max(0, min(rx + rw, ox + ow) - max(rx, ox))
+        iy = max(0, min(ry + rh, oy + oh) - max(ry, oy))
+        return (ix * iy) > 0
+
+    def _grab_safe_mss(self):
+        """Full-screen grab that refuses to capture the overlay itself."""
+        if self._sct is None:
+            return None
+        if self._overlay_covers_capture():
+            if not self._mss_warned:
+                self._mss_warned = True
+                _log("fullscreen grab skipped: overlay covers the captured "
+                     "monitor (choose another window/monitor)")
+            return None
         return self._grab_mss()
+
+    def _topmost_window_on_monitor(self):
+        """Topmost non-BoostLayer, non-panel window covering the capture
+        monitor.  Used as the safe target for full-screen mode."""
+        rect = self._capture_rect()
+        if rect is None:
+            return None
+        try:
+            from Xlib import display as _xd, X
+        except ImportError:
+            return None
+        try:
+            d = _xd.Display()
+        except Exception:
+            return None
+        result = None
+        try:
+            root = d.screen().root
+            try:
+                children = root.query_tree().children
+            except Exception:
+                children = []
+            pid_atom = d.intern_atom("_NET_WM_PID")
+            type_atom = d.intern_atom("_NET_WM_WINDOW_TYPE")
+            skip_types = {
+                d.intern_atom("_NET_WM_WINDOW_TYPE_DOCK"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_DESKTOP"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_TOOLBAR"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_MENU"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_DROPDOWN_MENU"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_POPUP_MENU"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_TOOLTIP"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_NOTIFICATION"),
+                d.intern_atom("_NET_WM_WINDOW_TYPE_SPLASH"),
+            }
+            mono_area = max(1, rect["width"] * rect["height"])
+            # XQueryTree returns children bottom-to-top: walk topmost first.
+            for w in reversed(children):
+                if int(w.id) in self._bad_windows:
+                    continue
+                try:
+                    if w.get_attributes().map_state != X.IsViewable:
+                        continue
+                    geo = w.get_geometry()
+                except Exception:
+                    continue
+                # Direct children of root: geometry is already in root coords.
+                x, y, ww, hh = geo.x, geo.y, geo.width, geo.height
+                if ww < 200 or hh < 120:
+                    continue
+                ix = max(0, min(x + ww, rect["left"] + rect["width"]) -
+                         max(x, rect["left"]))
+                iy = max(0, min(y + hh, rect["top"] + rect["height"]) -
+                         max(y, rect["top"]))
+                if ix * iy < mono_area * 0.6:
+                    continue          # too small to represent the monitor
+                try:
+                    prop = w.get_full_property(type_atom, 0)
+                    if prop and prop.value is not None:
+                        v = prop.value
+                        first = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
+                        if first in skip_types:
+                            continue
+                except Exception:
+                    pass
+                try:
+                    prop = w.get_full_property(pid_atom, 0)
+                    if prop and prop.value is not None:
+                        v = prop.value
+                        pid = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
+                        if pid == os.getpid():
+                            continue
+                except Exception:
+                    pass
+                result = int(w.id)
+                break
+        except Exception:
+            result = None
+        finally:
+            try:
+                d.close()
+            except Exception:
+                pass
+        return result
 
     @staticmethod
     def _is_own_window(wid):
@@ -1644,6 +2218,13 @@ class CaptureThread(threading.Thread):
         """Wayland-native fallback: capture the focused output via 'grim'
         (which talks to wlr-screencopy / the xdg-desktop-portal underneath)."""
         if not shutil.which("grim"):
+            return None
+        # grim captures the composited output, so it would include our own
+        # overlay when it is on the captured monitor (mirror feedback loop).
+        if self._overlay_covers_capture():
+            if not self._mss_warned:
+                self._mss_warned = True
+                _log("grim capture skipped: overlay covers the captured output")
             return None
         # Rate-limit: grim is a one-shot screencopy, not a stream.
         now = time.time()
@@ -1870,8 +2451,11 @@ class GLRenderer(threading.Thread):
         # (not blindly at (0,0), which breaks on multi-monitor layouts).
         mx, my = glfw.get_monitor_pos(self._monitor)
         glfw.set_window_pos(self._win, mx, my)
+        self.state.overlay_rect = (int(mx), int(my),
+                                   int(mode.size.width), int(mode.size.height))
         glfw.make_context_current(self._win)
         glfw.swap_interval(1)
+        self._make_click_through()
 
         # Core GL state.
         gl.glDisable(gl.GL_DEPTH_TEST)
@@ -2023,12 +2607,43 @@ class GLRenderer(threading.Thread):
         # never kicked out of its own fullscreen mode.
         if active:
             glfw.show_window(self._win)
+            # Keep clicks going to the game/desktop, not to the overlay.
+            self._make_click_through()
             # Raise without stealing input focus: focusing the overlay would
             # both annoy the player and make "active window" capture pick the
             # overlay instead of the game.
             self._raise_overlay()
         else:
             glfw.hide_window(self._win)
+
+    def _make_click_through(self):
+        """Make the overlay input-transparent (X11 SHAPE input region).
+
+        Without this, the always-on-top full-screen window would swallow every
+        click and keypress, so the desktop and the game would seem frozen."""
+        if self.display != "x11":
+            return
+        try:
+            from Xlib import display as _xdisplay, X
+            from Xlib.ext import shape
+            if not self._x11_win_id:
+                self._x11_win_id = int(glfw.get_x11_window(self._win) or 0)
+            wid = self._x11_win_id
+            if not wid:
+                return
+            d = _xdisplay.Display()
+            try:
+                d.query_extension("SHAPE")
+                w = d.create_resource_object("window", wid)
+                # Empty input region: all input passes through to the window
+                # below the overlay.
+                w.shape_rectangles(shape.SO.Set, shape.SK.Input,
+                                   X.Unsorted, 0, 0, [])
+                d.sync()
+            finally:
+                d.close()
+        except Exception as e:
+            _log("overlay: click-through unavailable: %r" % (e,))
 
     def _raise_overlay(self):
         """Keep the overlay above the game without stealing input focus.
@@ -2080,6 +2695,8 @@ class GLRenderer(threading.Thread):
         mx, my = glfw.get_monitor_pos(self._monitor)
         glfw.set_window_size(self._win, mode.size.width, mode.size.height)
         glfw.set_window_pos(self._win, mx, my)
+        self.state.overlay_rect = (int(mx), int(my),
+                                   int(mode.size.width), int(mode.size.height))
         self._windowed_size = (mode.size.width, mode.size.height)
 
     def _loop(self):
@@ -3093,6 +3710,14 @@ def main():
     print("=" * 60)
     print("%s v%s — Linux scaling overlay" % (APP_NAME, APP_VERSION))
     print("=" * 60)
+
+    # Only one instance may run: several overlays capturing and presenting at
+    # the same time would stack windows and can freeze the desktop.
+    instance_lock = _acquire_single_instance()
+    if instance_lock is False:
+        _log("second instance refused (single-instance lock held)")
+        print("Another BoostLayer instance is already running — exiting.")
+        return 0
 
     # Log uncaught thread exceptions instead of losing them (the packaged
     # build has no attached terminal).
