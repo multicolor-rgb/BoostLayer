@@ -104,6 +104,8 @@ TRANSLATIONS = {
         "frame_generation": "Frame generation (shader)",
         "capture_delay_ms": "Capture delay (ms)",
         "capture_target": "Capture target",
+        "capture_monitor": "Capture monitor",
+        "output_monitor": "Output monitor",
         "fullscreen": "Fullscreen",
         "active_window": "Active Window",
         "window": "Window",
@@ -150,6 +152,8 @@ TRANSLATIONS = {
         "frame_generation": "Frame-Generierung (Shader)",
         "capture_delay_ms": "Aufnahmeverzögerung (ms)",
         "capture_target": "Aufnahmeziel",
+        "capture_monitor": "Aufnahme-Monitor",
+        "output_monitor": "Ausgabe-Monitor",
         "fullscreen": "Vollbild",
         "active_window": "Aktives Fenster",
         "window": "Fenster",
@@ -196,6 +200,8 @@ TRANSLATIONS = {
         "frame_generation": "Generowanie klatek (shader)",
         "capture_delay_ms": "Opóźnienie przechwytywania (ms)",
         "capture_target": "Cel przechwytywania",
+        "capture_monitor": "Monitor przechwytywania",
+        "output_monitor": "Monitor wyjścia",
         "fullscreen": "Pełny ekran",
         "active_window": "Aktywne okno",
         "window": "Okno",
@@ -877,6 +883,8 @@ class AppState:
         self.capture_delay_ms = 0
         self.capture_target = "fullscreen"   # "fullscreen" | "window"
         self.capture_window_id = None        # X11 window id for XComposite
+        self.capture_monitor = 1             # mss monitor index (1 = primary)
+        self.output_monitor = 0              # GLFW monitor index (0 = primary)
         self.osd_enabled = True
         self.osd_show_fps = True
         self.osd_show_cpu = True
@@ -920,6 +928,8 @@ class AppState:
                 "capture_delay_ms": self.capture_delay_ms,
                 "capture_target": self.capture_target,
                 "capture_window_id": self.capture_window_id,
+                "capture_monitor": self.capture_monitor,
+                "output_monitor": self.output_monitor,
                 "osd_enabled": self.osd_enabled,
                 "osd_show_fps": self.osd_show_fps,
                 "osd_show_cpu": self.osd_show_cpu,
@@ -1349,7 +1359,9 @@ class CaptureThread(threading.Thread):
         return self._grab_mss()
 
     def _grab_mss(self):
-        shot = self._sct.grab(self._monitor)
+        mons = self._sct.monitors
+        idx = max(1, min(int(self.state.capture_monitor), len(mons) - 1))
+        shot = self._sct.grab(mons[idx])
         w = shot.width
         h = shot.height
         return np.frombuffer(shot.raw, dtype=np.uint8).reshape(h, w, 4)
@@ -1512,6 +1524,7 @@ class GLRenderer(threading.Thread):
         # GL objects (created on the render thread).
         self._win = None
         self._monitor = None
+        self._monitor_idx = None
         self._windowed_size = (1280, 720)
 
         self._prog = {}
@@ -1572,7 +1585,10 @@ class GLRenderer(threading.Thread):
         glfw.window_hint(glfw.VISIBLE, False)
         glfw.window_hint(glfw.RESIZABLE, False)
 
-        self._monitor = glfw.get_primary_monitor()
+        monitors = glfw.get_monitors()
+        idx = max(0, min(self.state.output_monitor, len(monitors) - 1))
+        self._monitor_idx = idx
+        self._monitor = monitors[idx]
         mode = glfw.get_video_mode(self._monitor)
         self._windowed_size = (mode.size.width, mode.size.height)
         self._win = glfw.create_window(mode.size.width, mode.size.height,
@@ -1580,10 +1596,10 @@ class GLRenderer(threading.Thread):
         if not self._win:
             glfw.terminate()
             raise RuntimeError("glfw.create_window() failed")
-        # Borderless full-screen overlay: undecorated + always-on-top window
-        # pinned to (0,0). We deliberately do NOT use set_window_monitor()
-        # (exclusive fullscreen) so we never fight the game's own fullscreen.
-        glfw.set_window_pos(self._win, 0, 0)
+        # Borderless full-screen overlay positioned on the selected monitor
+        # (not blindly at (0,0), which breaks on multi-monitor layouts).
+        mx, my = glfw.get_monitor_pos(self._monitor)
+        glfw.set_window_pos(self._win, mx, my)
         glfw.make_context_current(self._win)
         glfw.swap_interval(1)
 
@@ -1739,6 +1755,23 @@ class GLRenderer(threading.Thread):
         else:
             glfw.hide_window(self._win)
 
+    def _sync_output_monitor(self):
+        """Reposition/resize the overlay if the output monitor changed."""
+        try:
+            monitors = glfw.get_monitors()
+        except Exception:
+            return
+        idx = max(0, min(int(self.state.output_monitor), len(monitors) - 1))
+        if idx == self._monitor_idx:
+            return
+        self._monitor_idx = idx
+        self._monitor = monitors[idx]
+        mode = glfw.get_video_mode(self._monitor)
+        mx, my = glfw.get_monitor_pos(self._monitor)
+        glfw.set_window_size(self._win, mode.size.width, mode.size.height)
+        glfw.set_window_pos(self._win, mx, my)
+        self._windowed_size = (mode.size.width, mode.size.height)
+
     def _loop(self):
         gc.disable()
         while self.state.running.is_set():
@@ -1746,6 +1779,8 @@ class GLRenderer(threading.Thread):
             if glfw.window_should_close(self._win):
                 self.state.running.clear()
                 break
+
+            self._sync_output_monitor()
 
             active = self.state.scaling_active
             if active != self._was_active:
@@ -2338,6 +2373,25 @@ class BoostLayerApp:
         self.window_menu.pack(side="right")
         self._refresh_windows()
 
+        # Capture monitor (mss index) and output monitor (GLFW index).
+        row = ctk.CTkFrame(t, fg_color="transparent")
+        row.pack(fill="x", **pad)
+        ctk.CTkLabel(row, text=self._t("capture_monitor")).pack(side="left")
+        self.cap_mon_menu = ctk.CTkOptionMenu(
+            row, values=["1", "2", "3", "4"], width=90,
+            command=self._on_capture_monitor)
+        self.cap_mon_menu.set(str(st.capture_monitor))
+        self.cap_mon_menu.pack(side="right")
+
+        row = ctk.CTkFrame(t, fg_color="transparent")
+        row.pack(fill="x", **pad)
+        ctk.CTkLabel(row, text=self._t("output_monitor")).pack(side="left")
+        self.out_mon_menu = ctk.CTkOptionMenu(
+            row, values=["1", "2", "3", "4"], width=90,
+            command=self._on_output_monitor)
+        self.out_mon_menu.set(str(st.output_monitor + 1))
+        self.out_mon_menu.pack(side="right")
+
         ctk.CTkLabel(t, text=self._t("capture_note"), wraplength=460,
                      justify="left", font=ctk.CTkFont(size=11),
                      text_color="#8a8a8a"
@@ -2462,6 +2516,18 @@ class BoostLayerApp:
             return
         self.state.update(capture_target="window", capture_window_id=wid)
         self.target_menu.set(self._t("window"))
+
+    def _on_capture_monitor(self, value):
+        try:
+            self.state.update(capture_monitor=int(value))
+        except ValueError:
+            pass
+
+    def _on_output_monitor(self, value):
+        try:
+            self.state.update(output_monitor=int(value) - 1)  # 1-based -> 0-based
+        except ValueError:
+            pass
 
     def _on_osd(self):
         self.state.update(osd_enabled=bool(self.osd_switch.get()))
