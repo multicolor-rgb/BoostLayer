@@ -1133,8 +1133,10 @@ def list_windows():
     root = d.screen().root
     try:
         net_name = d.intern_atom("_NET_WM_NAME")
+        wm_class_atom = d.intern_atom("WM_CLASS")
     except Exception:
         net_name = None
+        wm_class_atom = None
     windows = []
     try:
         children = root.query_tree().children
@@ -1154,8 +1156,15 @@ def list_windows():
                     name = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
             except Exception:
                 name = None
-        if not name:
-            continue
+        if not name and wm_class_atom is not None:
+            try:
+                prop = w.get_full_property(wm_class_atom, 0)
+                if prop and prop.value:
+                    v = prop.value
+                    cls = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+                    name = cls.split("\x00")[-1] or cls
+            except Exception:
+                name = None
         try:
             geo = w.get_geometry()
             attrs = w.get_attributes()
@@ -1165,6 +1174,9 @@ def list_windows():
             continue
         if geo.width < 60 or geo.height < 60:
             continue
+        if not name:
+            # Window has no title/class — still list it with a fallback label.
+            name = "Window 0x%x" % int(w.id)
         windows.append((int(w.id), name, geo.width, geo.height))
     try:
         d.close()
@@ -2144,6 +2156,8 @@ class BoostLayerApp:
         self.display_server = display_server
         self.gpu_name = gpu_name
         self.lang = state.lang
+        self._win_refresh_t0 = 0.0
+        self._last_win_ids = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -2408,6 +2422,10 @@ class BoostLayerApp:
 
     def _refresh_windows(self):
         wins = list_windows()
+        new_ids = tuple(sorted(w[0] for w in wins))
+        if new_ids == getattr(self, "_last_win_ids", None):
+            return  # no new/removed windows — avoid churn while a game launches
+        self._last_win_ids = new_ids
         self._windows = wins
         self._win_by_label = {}
         labels = []
@@ -2467,6 +2485,13 @@ class BoostLayerApp:
     def _periodic_status(self):
         if self.root.winfo_exists():
             self._refresh_status()
+            now = time.time()
+            if now - self._win_refresh_t0 >= 3.0:
+                self._win_refresh_t0 = now
+                try:
+                    self._refresh_windows()
+                except Exception:
+                    pass
             self.root.after(1000, self._periodic_status)
 
     def _on_lang(self, value):
