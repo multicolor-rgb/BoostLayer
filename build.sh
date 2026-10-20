@@ -133,13 +133,20 @@ log "Building one-file binary with PyInstaller..."
   --collect-all glfw \
   --collect-all pynput \
   --collect-all evdev \
+  --collect-all pystray \
+  --hidden-import PIL.Image \
+  --hidden-import PIL.ImageDraw \
   "$ROOT/main.py"
 
-if [ -n "$UPX_BIN" ]; then
-  log "Compressing binary with UPX ($UPX_BIN)..."
+# NOTE: compressing the *final* PyInstaller one-file executable with UPX is not
+# supported upstream: UPX rewrites the bootloader and the embedded PKG archive
+# can no longer be located ("Could not load PyInstaller's embedded PKG
+# archive").  PyInstaller already compiles the bundled modules to bytecode and
+# runs with --noupx for the collected libraries, so the executable is left
+# untouched.  Set BOOSTLAYER_UPX=1 to force the old (broken) behaviour.
+if [ "${BOOSTLAYER_UPX:-0}" = "1" ] && [ -n "$UPX_BIN" ]; then
+  warn "Forcing UPX on the one-file executable (unsupported — result may not start)."
   "$UPX_BIN" --best --lzma "$BIN" || warn "UPX failed; continuing with uncompressed binary."
-else
-  warn "UPX not available — skipping binary compression."
 fi
 
 ORIG_SIZE=$(du -h "$BIN" | cut -f1)
@@ -279,11 +286,12 @@ Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: multicolor-rgb <multicolor-rgb@users.noreply.github.com>
 Depends: libc6 (>= 2.17), libgl1, libx11-6
+Recommends: gir1.2-ayatanaappindicator3-0.1 | gir1.2-appindicator3-0.1
 Description: Ultra-lean Linux scaling overlay (Lossless Scaling clone)
  BoostLayer is a native Linux scaling overlay with AMD FSR 1.0 upscaling,
  integer/nearest/bicubic scaling, in-shader frame generation, a performance
  OSD (FPS/CPU/GPU/RAM) and a global hotkey. Works on AMD (Mesa), NVIDIA and
- Intel (iris) under both X11 and Wayland.
+ Intel (iris) under both X11 and Wayland. Minimises to the system tray.
 EOF
 
   DEB_OUT="$DIST_DIR/${APP_NAME}_${VERSION}_${DEB_ARCH}.deb"

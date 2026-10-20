@@ -74,6 +74,25 @@ APP_NAME = "BoostLayer"
 APP_VERSION = "1.0.0"
 DEFAULT_HOTKEY = "<ctrl>+<alt>+s"
 
+# Persistent log (especially useful for the packaged GUI build, where stdout is
+# not attached to a terminal).
+APP_LOG = os.path.join(
+    os.environ.get(
+        "XDG_STATE_HOME",
+        os.path.join(os.path.expanduser("~"), ".local", "state")),
+    "boostlayer", "boostlayer.log")
+
+
+def _log(msg):
+    """Append a timestamped line to the application log (best effort)."""
+    try:
+        os.makedirs(os.path.dirname(APP_LOG), exist_ok=True)
+        with open(APP_LOG, "a", encoding="utf-8") as fh:
+            fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
 # Scaling-mode identifiers are stable ASCII keys; display names are localised.
 SCALE_MODE_KEYS = ["fsr", "integer", "nearest", "bicubic"]
 SCALE_MODE_IDS = {k: i for i, k in enumerate(SCALE_MODE_KEYS)}
@@ -111,6 +130,7 @@ TRANSLATIONS = {
         "window": "Window",
         "target_window": "Target window",
         "refresh": "Refresh",
+        "select_window": "Click window",
         "capture_note": "Window mode captures the selected window via XComposite (works even when covered by the overlay). Run the game in windowed mode for best results.",
         "performance_osd": "Performance OSD",
         "displayed_metrics": "Displayed metrics",
@@ -159,6 +179,7 @@ TRANSLATIONS = {
         "window": "Fenster",
         "target_window": "Zielfenster",
         "refresh": "Aktualisieren",
+        "select_window": "Fenster klicken",
         "capture_note": "Fenstermodus erfasst das gewählte Fenster über XComposite (funktioniert auch, wenn es vom Overlay verdeckt wird). Spiel im Fenstermodus starten.",
         "performance_osd": "Performance-OSD",
         "displayed_metrics": "Angezeigte Metriken",
@@ -207,6 +228,7 @@ TRANSLATIONS = {
         "window": "Okno",
         "target_window": "Okno docelowe",
         "refresh": "Odśwież",
+        "select_window": "Kliknij okno",
         "capture_note": "Tryb Okno przechwytuje wybrane okno przez XComposite (działa też, gdy jest zasłonięte overlayem). Uruchom grę w trybie okienkowym.",
         "performance_osd": "OSD wydajności",
         "displayed_metrics": "Wyświetlane metryki",
@@ -1144,10 +1166,13 @@ def list_windows():
     try:
         net_name = d.intern_atom("_NET_WM_NAME")
         wm_class_atom = d.intern_atom("WM_CLASS")
+        net_pid_atom = d.intern_atom("_NET_WM_PID")
     except Exception:
         net_name = None
         wm_class_atom = None
+        net_pid_atom = None
     windows = []
+    exe_hints = None
     try:
         children = root.query_tree().children
     except Exception:
@@ -1175,6 +1200,23 @@ def list_windows():
                     name = cls.split("\x00")[-1] or cls
             except Exception:
                 name = None
+        comm = None
+        if net_pid_atom is not None:
+            try:
+                prop = w.get_full_property(net_pid_atom, 0)
+                if prop and prop.value is not None:
+                    v = prop.value
+                    pid = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
+                    comm = _pid_comm(pid)
+            except Exception:
+                comm = None
+        if not name and comm:
+            name = comm
+        # Wine/Proton windows often share a generic title — append the .exe
+        # name so the actual game is easy to spot in the list.
+        if name and comm and comm.lower().endswith(".exe") \
+                and comm.lower() not in name.lower():
+            name = "%s [%s]" % (name, comm)
         try:
             geo = w.get_geometry()
             attrs = w.get_attributes()
@@ -1194,6 +1236,14 @@ def list_windows():
                 continue
         if not name:
             name = "Window %dx%d" % (geo.width, geo.height)
+            # Wine/Proton virtual desktops expose an unnamed override-redirect
+            # window.  Use the running .exe name(s) as a hint so the game is
+            # recognisable in the list.
+            if is_override:
+                if exe_hints is None:
+                    exe_hints = _wine_exe_names()
+                if exe_hints:
+                    name = "%s [%s]" % (name, ", ".join(exe_hints[:2]))
         windows.append((int(w.id), name, geo.width, geo.height))
     try:
         d.close()
@@ -1209,6 +1259,177 @@ def _mask_to_byte(mask):
         return 0
     m = int(mask)
     return ((m & -m).bit_length() - 1) // 8
+
+
+def _pid_comm(pid):
+    """Resolve a PID to its short process name (e.g. 'DP.exe')."""
+    if not pid:
+        return None
+    try:
+        with open("/proc/%d/comm" % int(pid)) as fh:
+            return fh.read().strip()
+    except Exception:
+        return None
+
+
+def active_window_id():
+    """Return the currently-focused (active) X11 window id, or None."""
+    try:
+        from Xlib import display, X
+    except ImportError:
+        return None
+    try:
+        d = display.Display()
+    except Exception:
+        return None
+    try:
+        root = d.screen().root
+        atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+        prop = root.get_full_property(atom, X.AnyPropertyType)
+        if prop and prop.value is not None:
+            v = prop.value
+            if isinstance(v, (list, tuple)):
+                return int(v[0]) if v else None
+            return int(v)
+    except Exception:
+        pass
+    finally:
+        try:
+            d.close()
+        except Exception:
+            pass
+    return None
+
+
+def _has_wm_state(win):
+    try:
+        prop = win.get_full_property(win.display.intern_atom("WM_STATE"), 0)
+        return prop is not None
+    except Exception:
+        return False
+
+
+def _find_client_window(win, depth=0):
+    """Return the real client window below a WM frame (top-level window).
+    Frames carry no WM_STATE; the client inside them does."""
+    if win is None or depth > 4:
+        return None
+    if _has_wm_state(win):
+        return win
+    try:
+        children = win.query_tree().children
+    except Exception:
+        return None
+    for child in children:
+        found = _find_client_window(child, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def select_window_by_click():
+    """Grab the pointer, let the user click a window, and return its client
+    window id (or None).  Right-click cancels; gives up after 30 s."""
+    import select
+    try:
+        from Xlib import display, X
+    except ImportError:
+        return None
+    try:
+        d = display.Display()
+    except Exception:
+        return None
+    root = d.screen().root
+    child = None
+    cursor = None
+    try:
+        # Visual feedback: crosshair cursor while picking.
+        try:
+            from Xlib import Xcursorfont
+            font = d.open_font("cursor")
+            cursor = font.create_glyph_cursor(
+                font, Xcursorfont.crosshair, Xcursorfont.crosshair + 1,
+                (65535, 65535, 65535), (0, 0, 0))
+            root.change_attributes(cursor=cursor)
+        except Exception:
+            cursor = None
+        root.grab_pointer(True, X.ButtonPressMask, X.GrabModeAsync,
+                          X.GrabModeAsync, X.NONE, X.NONE, X.CurrentTime)
+        d.sync()
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            if not d.pending_events():
+                select.select([d.fileno()], [], [], 0.1)
+                continue
+            event = d.next_event()
+            if event.type != X.ButtonPress:
+                continue
+            if getattr(event, "detail", 1) == 3:   # right button -> cancel
+                child = None
+                break
+            child = getattr(event, "child", None)
+            if not child:
+                child = root.query_pointer().child
+            break
+    except Exception:
+        child = None
+    finally:
+        try:
+            d.ungrab_pointer(X.CurrentTime)
+        except Exception:
+            pass
+        if cursor is not None:
+            try:
+                root.change_attributes(cursor=X.NONE)
+            except Exception:
+                pass
+        try:
+            d.sync()
+        except Exception:
+            pass
+
+    top = None
+    try:
+        if isinstance(child, int):
+            from Xlib.xobject.drawable import Window
+            child = Window(d.display, child, d)
+        w = child
+        if w is not None and getattr(w, "id", 0) not in (0, X.NONE):
+            while True:
+                parent = w.query_tree().parent
+                if parent is None or getattr(parent, "id", 0) in (0, X.NONE):
+                    break
+                if parent.id == root.id:
+                    top = w
+                    break
+                w = parent
+    except Exception:
+        top = None
+
+    result = None
+    if top is not None:
+        client = _find_client_window(top)
+        result = int((client if client is not None else top).id)
+    try:
+        d.close()
+    except Exception:
+        pass
+    return result
+
+
+def _wine_exe_names():
+    """Sorted unique names of running Wine/Proton executables."""
+    names = set()
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            comm = _pid_comm(int(entry))
+            if comm and comm.lower().endswith(".exe"):
+                names.add(comm)
+    except Exception:
+        pass
+    return sorted(names)
 
 
 class XCompositeCapture:
@@ -1329,6 +1550,8 @@ class CaptureThread(threading.Thread):
         self._sct = None
         self._monitor = None
         self._xcomp = None
+        self._active_win_id = None
+        self._last_active_refresh = 0.0
         self._seq = 0
         self._last_window_refresh = 0.0
         self._window_region = None
@@ -1341,7 +1564,9 @@ class CaptureThread(threading.Thread):
         self._sct = None
         self._monitor = None
         if HAS_MSS:
-            self._sct = mss.mss()
+            # mss 10 renamed mss.mss() to mss.MSS(); prefer the new API.
+            factory = getattr(mss, "MSS", None) or mss.mss
+            self._sct = factory()
             self._monitor = self._sct.monitors[1]  # primary monitor
         return True
 
@@ -1349,14 +1574,56 @@ class CaptureThread(threading.Thread):
         """Dispatch to the appropriate capture backend."""
         target = self.state.capture_target
         win_id = self.state.capture_window_id
-        if target == "window" and win_id:
-            arr = self._grab_xcomp(win_id)
-            if arr is None and self.display == "wayland":
-                arr = self._grab_grim()
-            return arr
+        if target in ("window", "active"):
+            if target == "active":
+                now = time.time()
+                if now - self._last_active_refresh > 0.5:
+                    self._last_active_refresh = now
+                    new_id = active_window_id()
+                    # Ignore BoostLayer's own windows (the GUI or the overlay),
+                    # otherwise we would capture ourselves and show a mirror.
+                    if new_id and not self._is_own_window(new_id):
+                        self._active_win_id = new_id
+                win_id = self._active_win_id
+            if win_id:
+                arr = self._grab_xcomp(win_id)
+                if arr is None and self.display == "wayland":
+                    arr = self._grab_grim()
+                if arr is not None:
+                    return arr
+                # Last resort: if the window cannot be composited (some
+                # override-redirect/compositor-internal windows), fall back to
+                # a full-screen grab instead of showing a black overlay.
         if self._sct is None:
             return None
         return self._grab_mss()
+
+    @staticmethod
+    def _is_own_window(wid):
+        """True if the window belongs to this process (BoostLayer itself)."""
+        try:
+            from Xlib import display as _xd
+        except ImportError:
+            return False
+        try:
+            d = _xd.Display()
+        except Exception:
+            return False
+        try:
+            w = d.create_resource_object("window", int(wid))
+            prop = w.get_full_property(d.intern_atom("_NET_WM_PID"), 0)
+            if prop and prop.value is not None:
+                v = prop.value
+                pid = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
+                return pid == os.getpid()
+        except Exception:
+            return False
+        finally:
+            try:
+                d.close()
+            except Exception:
+                pass
+        return False
 
     def _grab_mss(self):
         mons = self._sct.monitors
@@ -1520,6 +1787,7 @@ class GLRenderer(threading.Thread):
         super().__init__(name="BoostLayer-Renderer", daemon=True)
         self.state = state
         self.stats = stats_collector
+        self.display = detect_display_server()
 
         # GL objects (created on the render thread).
         self._win = None
@@ -1568,6 +1836,8 @@ class GLRenderer(threading.Thread):
         self._osd_data = None
 
         self._was_active = False
+        self._x11_win_id = 0
+        self._last_raise = 0.0
 
     # ======================================================================
     # GLFW + GL initialisation
@@ -1739,6 +2009,7 @@ class GLRenderer(threading.Thread):
             self._init_gl()
         except Exception as e:
             print("[BoostLayer] Renderer init failed:", e)
+            _log("renderer init failed: %r" % (e,))
             glfw.terminate()
             return
         try:
@@ -1752,8 +2023,47 @@ class GLRenderer(threading.Thread):
         # never kicked out of its own fullscreen mode.
         if active:
             glfw.show_window(self._win)
+            # Raise without stealing input focus: focusing the overlay would
+            # both annoy the player and make "active window" capture pick the
+            # overlay instead of the game.
+            self._raise_overlay()
         else:
             glfw.hide_window(self._win)
+
+    def _raise_overlay(self):
+        """Keep the overlay above the game without stealing input focus.
+
+        ``raise_window`` alone is ignored by some WMs when a fullscreen game
+        re-stacks itself, so every second we also re-assert _NET_WM_STATE_ABOVE
+        through an EWMH client message."""
+        if self.display != "x11":
+            return
+        self._last_raise = time.time()
+        try:
+            if not self._x11_win_id:
+                self._x11_win_id = int(glfw.get_x11_window(self._win) or 0)
+            wid = self._x11_win_id
+            if not wid:
+                return
+            from Xlib import display as _xdisplay, X, protocol
+            d = _xdisplay.Display()
+            try:
+                w = d.create_resource_object("window", wid)
+                root = d.screen().root
+                state_atom = d.intern_atom("_NET_WM_STATE")
+                above_atom = d.intern_atom("_NET_WM_STATE_ABOVE")
+                ev = protocol.event.ClientMessage(
+                    window=w, client_type=state_atom,
+                    data=(32, [1, above_atom, 0, 1, 0]))
+                root.send_event(
+                    ev, event_mask=(X.SubstructureRedirectMask |
+                                    X.SubstructureNotifyMask))
+                w.raise_window()
+                d.flush()
+            finally:
+                d.close()
+        except Exception:
+            pass
 
     def _sync_output_monitor(self):
         """Reposition/resize the overlay if the output monitor changed."""
@@ -1790,6 +2100,11 @@ class GLRenderer(threading.Thread):
             if not active:
                 time.sleep(0.02)
                 continue
+
+            # Re-assert always-on-top periodically (some WMs drop the hint
+            # when a fullscreen game restacks itself) — no focus stealing.
+            if time.time() - self._last_raise > 1.0:
+                self._raise_overlay()
 
             self._render_frame()
 
@@ -2146,6 +2461,118 @@ class HotkeyListener:
             pass
 
 
+def _make_tray_image():
+    """Build a PIL image for the system tray icon (lightning bolt)."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([2, 2, 61, 61], radius=14, fill=(26, 26, 46, 255))
+    bolt = [
+        (int(0.594 * size), int(0.133 * size)),
+        (int(0.242 * size), int(0.539 * size)),
+        (int(0.445 * size), int(0.539 * size)),
+        (int(0.367 * size), int(0.867 * size)),
+        (int(0.766 * size), int(0.422 * size)),
+        (int(0.547 * size), int(0.422 * size)),
+    ]
+    d.polygon(bolt, fill=(0, 232, 156, 255))
+    return img
+
+
+def _enable_system_gi():
+    """Make the distro's PyGObject (gi) importable inside a venv or a frozen
+    build.  Appended to ``sys.path`` so the venv's own packages still win."""
+    for p in ("/usr/lib/python3/dist-packages",
+              "/usr/lib/python3.12/dist-packages"):
+        if os.path.isdir(p) and p not in sys.path:
+            sys.path.append(p)
+    try:
+        import gi  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+class TrayIcon:
+    """System tray icon.  Prefers the Ayatana AppIndicator backend (works on
+    Cinnamon/GNOME/KDE) and falls back to the legacy XEmbed tray.  Optional —
+    degrades gracefully when pystray/Pillow/gi are unavailable."""
+
+    def __init__(self, on_show, on_quit, title="BoostLayer"):
+        self._icon = None
+        self._backend = None
+        self.title = title
+        try:
+            has_gi = _enable_system_gi()
+            if has_gi:
+                os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
+            else:
+                os.environ.setdefault("PYSTRAY_BACKEND", "xorg")
+            import importlib
+            import pystray
+            img = _make_tray_image()
+            if img is None:
+                return
+            menu = pystray.Menu(
+                pystray.MenuItem("Show", lambda *_: on_show(), default=True),
+                pystray.MenuItem("Quit", lambda *_: on_quit()),
+            )
+            names = ("_appindicator", "_xorg") if has_gi else ("_xorg",)
+            for name in names:
+                try:
+                    mod = importlib.import_module("pystray." + name)
+                    self._icon = mod.Icon("BoostLayer", img, title, menu)
+                    self._backend = name.lstrip("_")
+                    break
+                except Exception as e:
+                    _log("tray backend %s unavailable: %r"
+                         % (name.lstrip("_"), e))
+            if self._icon is None:
+                _log("tray disabled: no usable backend (gi=%s)" % has_gi)
+        except Exception as e:
+            _log("tray unavailable: %r" % (e,))
+            self._icon = None
+
+    @property
+    def available(self):
+        return self._icon is not None
+
+    @property
+    def visible(self):
+        """True once the icon is actually shown by the desktop's tray."""
+        try:
+            return bool(self._icon is not None and self._icon.visible)
+        except Exception:
+            return False
+
+    def start(self):
+        if self._icon is None:
+            return
+        _log("tray: starting backend=%s" % self._backend)
+        if hasattr(self._icon, "run_detached"):
+            self._icon.run_detached()
+        else:
+            threading.Thread(target=self._icon.run, daemon=True,
+                             name="BoostLayer-Tray").start()
+        threading.Thread(target=self._report_state, daemon=True,
+                         name="BoostLayer-TrayCheck").start()
+
+    def _report_state(self):
+        time.sleep(3.0)
+        _log("tray: backend=%s visible=%s" % (self._backend, self.visible))
+
+    def stop(self):
+        if self._icon is not None:
+            try:
+                self._icon.stop()
+            except Exception:
+                pass
+
+
 def _make_window_icon(tk_root, size=64):
     """Build the window/taskbar icon programmatically (no external file):
     a dark gradient square with a teal lightning bolt, matching the packaged
@@ -2200,6 +2627,7 @@ class BoostLayerApp:
         self.lang = state.lang
         self._win_refresh_t0 = 0.0
         self._last_win_ids = None
+        self._tray = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -2208,7 +2636,7 @@ class BoostLayerApp:
         self.root.title("BoostLayer")
         self.root.geometry("540x720")
         self.root.resizable(True, True)
-        self.root.protocol("WM_DELETE_WINDOW", self._quit)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Window/taskbar icon.
         try:
@@ -2216,6 +2644,16 @@ class BoostLayerApp:
             self.root.iconphoto(True, self._icon)
         except Exception:
             self._icon = None
+
+        # System tray icon (optional; closes to tray when available).
+        try:
+            self._tray = TrayIcon(self._show_from_tray, self._quit_from_tray)
+            if self._tray.available:
+                self._tray.start()
+            else:
+                self._tray = None
+        except Exception:
+            self._tray = None
 
         self._build_ui()
         self._refresh_status()
@@ -2348,28 +2786,37 @@ class BoostLayerApp:
         ctk.CTkLabel(row, text=self._t("capture_target")).pack(side="left")
         self._target_by_label = {
             self._t("fullscreen"): "fullscreen",
+            self._t("active_window"): "active",
             self._t("window"): "window",
         }
         self.target_menu = ctk.CTkOptionMenu(
-            row, values=[self._t("fullscreen"), self._t("window")],
+            row, values=[self._t("fullscreen"), self._t("active_window"),
+                         self._t("window")],
             width=150, command=self._on_target)
-        target_display = ("window" if st.capture_target == "window"
-                          else "fullscreen")
+        target_display = {
+            "fullscreen": "fullscreen", "active": "active_window",
+            "window": "window",
+        }.get(st.capture_target, "fullscreen")
         self.target_menu.set(self._t(target_display))
         self.target_menu.pack(side="right")
 
-        # Target window (XComposite) selector + refresh.
+        # Target window (XComposite) selector + actions.
         win_row = ctk.CTkFrame(t, fg_color="transparent")
         win_row.pack(fill="x", **pad)
         ctk.CTkLabel(win_row, text=self._t("target_window")).pack(side="left")
+        self.click_btn = ctk.CTkButton(
+            win_row, text=self._t("select_window"), width=90,
+            command=self._on_select_window)
+        self.click_btn.pack(side="right", padx=(0, 6))
         self.refresh_btn = ctk.CTkButton(
-            win_row, text=self._t("refresh"), width=70,
+            win_row, text=self._t("refresh"), width=60,
             command=self._refresh_windows)
         self.refresh_btn.pack(side="right", padx=(0, 6))
         self._windows = []
         self._win_by_label = {}
+        self._last_win_ids = None
         self.window_menu = ctk.CTkOptionMenu(
-            win_row, values=[], width=200, command=self._on_window)
+            win_row, values=[], width=180, command=self._on_window)
         self.window_menu.pack(side="right")
         self._refresh_windows()
 
@@ -2490,10 +2937,16 @@ class BoostLayerApp:
         self._windows = wins
         self._win_by_label = {}
         labels = []
+        seen = {}
         for wid, title, w, h in wins:
             label = "%s  (%dx%d)" % (title, w, h)
             if len(label) > 42:
                 label = label[:39] + "..."
+            if label in seen:
+                seen[label] += 1
+                label = "%s #%d" % (label, seen[label])
+            else:
+                seen[label] = 1
             labels.append(label)
             self._win_by_label[label] = wid
         if not labels:
@@ -2516,6 +2969,26 @@ class BoostLayerApp:
             return
         self.state.update(capture_target="window", capture_window_id=wid)
         self.target_menu.set(self._t("window"))
+
+    def _on_select_window(self):
+        """Hide the GUI, let the user click a window, then capture it."""
+        self.root.withdraw()
+        self.root.update()
+        time.sleep(0.3)
+        wid = None
+        try:
+            wid = select_window_by_click()
+        finally:
+            self.root.deiconify()
+        if wid:
+            self.state.update(capture_target="window", capture_window_id=wid)
+            self.target_menu.set(self._t("window"))
+            self._refresh_windows()
+            # Reflect the click even if the window list itself did not change.
+            for lab, w in self._win_by_label.items():
+                if w == wid:
+                    self.window_menu.set(lab)
+                    break
 
     def _on_capture_monitor(self, value):
         try:
@@ -2583,7 +3056,32 @@ class BoostLayerApp:
 
     def _quit(self):
         self.state.running.clear()
+        if self._tray is not None:
+            self._tray.stop()
         self.root.destroy()
+
+    def _on_close(self):
+        # Close button -> hide to tray.  If the desktop has no tray, minimize
+        # instead so the window can never get lost.
+        if self._tray is not None and self._tray.visible:
+            self.root.withdraw()
+        elif self._tray is not None:
+            self.root.iconify()
+        else:
+            self._quit()
+
+    def _show_from_tray(self):
+        def _restore():
+            self.root.deiconify()
+            self.root.lift()
+            try:
+                self.root.focus_force()
+            except Exception:
+                pass
+        self.root.after(0, _restore)
+
+    def _quit_from_tray(self):
+        self.root.after(0, self._quit)
 
     def run(self):
         self.root.mainloop()
@@ -2595,6 +3093,13 @@ def main():
     print("=" * 60)
     print("%s v%s — Linux scaling overlay" % (APP_NAME, APP_VERSION))
     print("=" * 60)
+
+    # Log uncaught thread exceptions instead of losing them (the packaged
+    # build has no attached terminal).
+    def _thread_hook(args):
+        _log("uncaught exception in %s: %r"
+             % (getattr(args.thread, "name", "?"), args.exc_value))
+    threading.excepthook = _thread_hook
 
     display = detect_display_server()
     gpu = GpuMonitor()
@@ -2622,6 +3127,11 @@ def main():
     capture.start()
     renderer.start()
     hotkey.start()
+
+    # Log uncaught thread exceptions instead of losing them (the packaged
+    # build has no attached terminal).
+    _log("%s v%s started (display=%s, gpu=%s)"
+         % (APP_NAME, APP_VERSION, display, gpu.name))
 
     rc = 0
     try:
