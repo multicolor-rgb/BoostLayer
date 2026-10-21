@@ -6,10 +6,12 @@ tested without a display server.  Runtime dependencies: Python stdlib + PyQt6
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import platform
+import signal
 import re
 import shlex
 import shutil
@@ -24,6 +26,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
@@ -725,6 +728,373 @@ def resolve_runner(stored_path: str, default_path: str = "") -> RunnerInfo | Non
         return RunnerInfo("system", "Systemowe Wine", system_wine)
     runners = discover_runners()
     return runners[0] if runners else None
+
+
+WINETRICKS_URL = (
+    "https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks"
+)
+WINETRICKS_MARKER = ".boostlayer-winetricks"
+WINETRICKS_LOG = db.CONFIG_DIR / "winetricks.log"
+_WINETRICKS_VERB_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}")
+
+
+def local_winetricks_path() -> Path:
+    return db.CONFIG_DIR / "tools" / "winetricks"
+
+
+def winetricks_path() -> str:
+    """Prefer the system package, then a private copy downloaded by Boostlayer."""
+    system = shutil.which("winetricks")
+    if system:
+        return system
+    local = local_winetricks_path()
+    if local.is_file() and os.access(local, os.X_OK):
+        return str(local)
+    return ""
+
+
+def protontricks_path() -> str:
+    return shutil.which("protontricks") or ""
+
+
+def download_winetricks(
+    progress: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Download the official Winetricks script into Boostlayer's config dir."""
+    target = local_winetricks_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.parent.chmod(0o700)
+    except OSError:
+        pass
+    download_file(WINETRICKS_URL, target, progress=progress, timeout=90)
+    try:
+        payload = target.read_bytes()[:8192]
+    except OSError as exc:
+        raise OSError(tr("Nie można odczytać pobranego Winetricks.")) from exc
+    if b"WINETRICKS_VERSION" not in payload:
+        target.unlink(missing_ok=True)
+        raise ValueError(tr("Pobrany plik nie wygląda na Winetricks."))
+    target.chmod(0o700)
+    return target
+
+
+def normalize_winetricks_verbs(verbs: Iterable[str] | str) -> list[str]:
+    """Normalize and validate Winetricks verb names.
+
+    Verbs are executed through an argument vector, never through a shell, but
+    rejecting unexpected characters still keeps stored state unambiguous.
+    """
+    if isinstance(verbs, str):
+        raw = re.split(r"[\s,]+", verbs.strip())
+    else:
+        raw = []
+        for value in verbs:
+            raw.extend(re.split(r"[\s,]+", str(value).strip()))
+    result: list[str] = []
+    for verb in raw:
+        if not verb:
+            continue
+        if not _WINETRICKS_VERB_RE.fullmatch(verb):
+            raise ValueError(tr("Nieprawidłowa nazwa komponentu Winetricks: {verb}", verb=verb))
+        if verb not in result:
+            result.append(verb)
+    return result
+
+
+def winetricks_verbs_text(verbs: Iterable[str] | str) -> str:
+    return " ".join(normalize_winetricks_verbs(verbs))
+
+
+def winetricks_actual_prefix(
+    game: dict[str, Any], runner: RunnerInfo, *, create: bool = True
+) -> Path:
+    prefix_text = str(game.get("wine_prefix", "") or "").strip()
+    if not prefix_text:
+        raise RuntimeError(tr("Gra nie ma ustawionego WINEPREFIX."))
+    prefix = Path(prefix_text).expanduser()
+    if create:
+        prefix.mkdir(parents=True, exist_ok=True)
+    # Proton owns a pfx directory inside STEAM_COMPAT_DATA_PATH.
+    return prefix / "pfx" if runner.kind == "proton" else prefix
+
+
+def _executable_stamp(path: str) -> str:
+    try:
+        stat = os.stat(path)
+        return f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+    except OSError:
+        return path
+
+
+def winetricks_state_hash(
+    verbs: Iterable[str],
+    executable: str,
+    runner_path: str = "",
+    appid: str = "",
+    winetricks: str = "",
+) -> str:
+    payload = "\n".join(
+        [
+            executable,
+            _executable_stamp(executable),
+            runner_path,
+            appid,
+            winetricks,
+            *sorted(set(verbs)),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass(frozen=True)
+class WinetricksPlan:
+    command: tuple[str, ...]
+    env: dict[str, str]
+    mode: str
+    verbs: tuple[str, ...]
+    state: str
+    prefix: Path | None = None
+    marker: Path | None = None
+
+
+def build_winetricks_plan(
+    database: "db.Database",
+    game: dict[str, Any],
+    verbs: Iterable[str] | str,
+) -> WinetricksPlan:
+    normalized = normalize_winetricks_verbs(verbs)
+    if not normalized:
+        raise ValueError(tr("Wybierz co najmniej jeden komponent Winetricks."))
+    if game.get("is_steam"):
+        appid = str(game.get("steam_appid", "")).strip()
+        if not appid:
+            raise RuntimeError(tr("Brak AppID Steam dla tej gry."))
+        protontricks = protontricks_path()
+        if not protontricks:
+            raise RuntimeError(
+                tr(
+                    "Protontricks nie jest zainstalowany. Zainstaluj go, aby "
+                    "używać Winetricks dla gier Steam."
+                )
+            )
+        winetricks = winetricks_path()
+        if not winetricks:
+            raise RuntimeError(
+                tr(
+                    "Winetricks nie jest zainstalowany. Zainstaluj go w "
+                    "Ustawieniach → Zależności."
+                )
+            )
+        env = os.environ.copy()
+        env["WINETRICKS"] = winetricks
+        if database is not None:
+            steam_path = str(database.get_setting("steam_path", "") or "").strip()
+            if steam_path:
+                env["STEAM_DIR"] = steam_path
+        state = winetricks_state_hash(
+            normalized, protontricks, appid=appid, winetricks=winetricks
+        )
+        return WinetricksPlan(
+            command=(protontricks, appid, "-q", *normalized),
+            env=env,
+            mode="steam",
+            verbs=tuple(normalized),
+            state=state,
+        )
+
+    runner = resolve_runner(
+        str(game.get("runner_path", "")),
+        str(database.get_setting("default_runner", "")),
+    )
+    if runner is None:
+        raise RuntimeError(
+            tr(
+                "Brak runnera Wine. Zainstaluj Wine albo pobierz Proton-GE/Wine-GE "
+                "w Menedżerze runnerów."
+            )
+        )
+    winetricks = winetricks_path()
+    if not winetricks:
+        raise RuntimeError(
+            tr(
+                "Winetricks nie jest zainstalowany. Zainstaluj go w "
+                "Ustawieniach → Zależności."
+            )
+        )
+    prefix = winetricks_actual_prefix(game, runner)
+    env = os.environ.copy()
+    env.update(parse_env_vars(str(game.get("env_vars", ""))))
+    env["WINEPREFIX"] = str(prefix)
+    env["WINE"] = runner.path
+    wineserver = Path(runner.path).with_name("wineserver")
+    if wineserver.is_file():
+        env["WINESERVER"] = str(wineserver)
+    if runner.kind == "proton":
+        env["STEAM_COMPAT_DATA_PATH"] = str(Path(game.get("wine_prefix", "")).expanduser())
+    env["WINEDEBUG"] = "-all"
+    env["WINEDLLOVERRIDES"] = "winemenubuilder.exe=d"
+    env["W_OPT_UNATTENDED"] = "1"
+    state = winetricks_state_hash(
+        normalized, winetricks, runner.path, winetricks=winetricks
+    )
+    marker = prefix / WINETRICKS_MARKER
+    return WinetricksPlan(
+        command=(winetricks, "-q", *normalized),
+        env=env,
+        mode=runner.kind,
+        verbs=tuple(normalized),
+        state=state,
+        prefix=prefix,
+        marker=marker,
+    )
+
+
+def winetricks_applied(game: dict[str, Any], plan: WinetricksPlan) -> bool:
+    if plan.marker is not None:
+        try:
+            return plan.marker.read_text(encoding="utf-8").strip() == plan.state
+        except OSError:
+            return False
+    return str(game.get("winetricks_state", "")) == plan.state
+
+
+def write_winetricks_marker(plan: WinetricksPlan) -> None:
+    if plan.marker is None:
+        return
+    try:
+        plan.marker.write_text(plan.state + "\n", encoding="utf-8")
+        plan.marker.chmod(0o600)
+    except OSError as exc:
+        log.warning("Cannot write Winetricks marker: %s", exc)
+
+
+class WinetricksInstallWorker(QThread):
+    progress = pyqtSignal(int)
+    status = pyqtSignal(str)
+    result = pyqtSignal(bool, str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+
+    def run(self) -> None:
+        try:
+            self.status.emit(tr("Pobieram Winetricks..."))
+
+            def report(current: int, expected: int) -> None:
+                if expected > 0:
+                    self.progress.emit(min(100, int(current * 100 / expected)))
+
+            target = download_winetricks(progress=report)
+            self.result.emit(True, str(target))
+        except Exception as exc:
+            log.error("Winetricks download failed: %s", traceback.format_exc())
+            self.result.emit(False, str(exc))
+
+
+class WinetricksWorker(QThread):
+    output = pyqtSignal(str)
+    result = pyqtSignal(bool, str)
+
+    def __init__(self, plan: WinetricksPlan, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.plan = plan
+        self._process: subprocess.Popen[str] | None = None
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except OSError:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+    def run(self) -> None:
+        if self._cancelled:
+            self.result.emit(False, tr("Instalacja Winetricks została anulowana."))
+            return
+        WINETRICKS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            WINETRICKS_LOG.write_text(
+                f"=== Boostlayer Winetricks {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n",
+                encoding="utf-8",
+            )
+            WINETRICKS_LOG.chmod(0o600)
+        except OSError:
+            pass
+        try:
+            self._process = subprocess.Popen(
+                list(self.plan.command),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self.plan.env,
+                start_new_session=True,
+            )
+            assert self._process.stdout is not None
+            with WINETRICKS_LOG.open("a", encoding="utf-8") as log_file:
+                for line in self._process.stdout:
+                    self.output.emit(line.rstrip("\n"))
+                    log_file.write(line)
+            code = self._process.wait()
+            if code == 0 and not self._cancelled:
+                write_winetricks_marker(self.plan)
+                self.result.emit(True, str(WINETRICKS_LOG))
+            elif self._cancelled:
+                self.result.emit(False, tr("Instalacja Winetricks została anulowana."))
+            else:
+                self.result.emit(
+                    False,
+                    tr("Winetricks zakończył się kodem {code}. Log: {path}", code=code, path=WINETRICKS_LOG),
+                )
+        except FileNotFoundError:
+            self.result.emit(False, tr("Nie znaleziono programu Winetricks."))
+        except Exception as exc:
+            log.error("Winetricks failed: %s", traceback.format_exc())
+            self.result.emit(False, str(exc))
+
+
+def steam_game_process_running(appid: str, exe_path: str = "") -> bool:
+    """Best-effort detection of a running Steam/Proton game process.
+
+    Steam does not expose a completion signal to external launchers.  Looking
+    for the inherited ``SteamAppId``/``SteamGameId`` variables is reliable for
+    the lifetime of the game process; the executable name is only a fallback.
+    """
+    appid = str(appid or "").strip()
+    if not appid:
+        return False
+    app_tag = f"SteamAppId={appid}".encode("utf-8", errors="ignore")
+    game_tag = f"SteamGameId={appid}".encode("utf-8", errors="ignore")
+    exe_name = Path(str(exe_path or "")).name.lower().encode("utf-8")
+    own_pid = os.getpid()
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == own_pid:
+            continue
+        try:
+            environ = (entry / "environ").read_bytes()[:65536]
+            if app_tag in environ or game_tag in environ:
+                return True
+            if exe_name:
+                cmdline = (entry / "cmdline").read_bytes().lower()
+                if exe_name in cmdline:
+                    return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 def parse_env_vars(text: str) -> dict[str, str]:

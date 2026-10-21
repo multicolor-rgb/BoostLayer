@@ -74,7 +74,17 @@ class TranslationTests(unittest.TestCase):
         self.assertTrue(keys.issubset(i18n_en.TRANSLATIONS))
         self.assertTrue(keys.issubset(i18n_de.TRANSLATIONS))
         # Display-only labels are translated through db.scaling_label().
-        extra = {"Natywnie", "Retro Kineskop (CRT)"}
+        extra = {
+            "Natywnie",
+            "Retro Kineskop (CRT)",
+            "PhysX (starsze gry)",
+            "Visual C++ 2015–2022",
+            "DirectX 9",
+            "XACT",
+            ".NET Framework 4.8",
+            "Media Foundation",
+            "Czcionki Core",
+        }
         self.assertEqual(set(i18n_en.TRANSLATIONS) - keys, extra)
         self.assertEqual(set(i18n_de.TRANSLATIONS) - keys, extra)
 

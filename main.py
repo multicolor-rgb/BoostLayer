@@ -20,6 +20,7 @@ from PyQt6.QtCore import (
     QByteArray,
     QCoreApplication,
     QEvent,
+    QEventLoop,
     QLibraryInfo,
     QObject,
     QPoint,
@@ -117,15 +118,19 @@ from core import (
     RunnerReleasesWorker,
     SteamOptionsWorker,
     SteamSyncWorker,
+    WinetricksInstallWorker,
+    WinetricksPlan,
+    WinetricksWorker,
     app_icon,
+    build_winetricks_plan,
     choose_runner_asset,
     dependency_install_groups,
     detect_steam_root,
     discover_runners,
     ensure_crt_shader,
-    exe_bits,
     ensure_launcher,
     ensure_steam_wrapper,
+    exe_bits,
     find_proton_script,
     gamemode32_installed,
     gamepad_udev_script,
@@ -136,16 +141,22 @@ from core import (
     mangohud32_script,
     mangohud_library_path,
     missing_installable_tools,
+    normalize_winetricks_verbs,
     package_manager,
     parse_env_vars,
+    protontricks_path,
     resolve_runner,
     steam_account,
     steam_client_command,
     steam_is_running,
+    steam_game_process_running,
     steam_launch_action_for_appid,
     steam_launch_option,
     steam_wrapper_path,
     tool_status,
+    winetricks_applied,
+    winetricks_path,
+    winetricks_verbs_text,
 )
 
 QSS = """
@@ -1424,6 +1435,9 @@ class GameDialog(QDialog):
         super().__init__(parent)
         self.db = database
         self.game = game
+        self.winetricks_verbs = str((game or {}).get("winetricks_verbs", "") or "")
+        self.winetricks_auto = bool(int((game or {}).get("winetricks_auto", 0) or 0))
+        self.winetricks_state = str((game or {}).get("winetricks_state", "") or "")
         self._cover_source = str((game or {}).get("cover_path", ""))
         self.setWindowTitle(tr("Edytuj grę") if game else tr("Dodaj grę"))
         self.setModal(True)
@@ -1503,6 +1517,24 @@ class GameDialog(QDialog):
         auto_prefix.clicked.connect(self._new_prefix)
         prefix_row.layout().addWidget(auto_prefix)
         form.addRow(tr("WINEPREFIX"), prefix_row)
+
+        winetricks_row = QWidget()
+        winetricks_layout = QHBoxLayout(winetricks_row)
+        winetricks_layout.setContentsMargins(0, 0, 0, 0)
+        winetricks_layout.setSpacing(8)
+        self.winetricks_summary = QLabel("")
+        self.winetricks_summary.setObjectName("Muted")
+        self.winetricks_summary.setWordWrap(True)
+        winetricks_layout.addWidget(self.winetricks_summary, 1)
+        manage_winetricks = QPushButton(tr("Zarządzaj…"))
+        manage_winetricks.setObjectName("GhostButton")
+        manage_winetricks.clicked.connect(self._manage_winetricks)
+        winetricks_layout.addWidget(manage_winetricks)
+        self.winetricks_auto_cb = QCheckBox(tr("Auto przed startem"))
+        self.winetricks_auto_cb.setChecked(self.winetricks_auto)
+        winetricks_layout.addWidget(self.winetricks_auto_cb)
+        form.addRow(tr("Winetricks"), winetricks_row)
+        self._refresh_winetricks_summary()
 
         self.env_edit = QPlainTextEdit(str((game or {}).get("env_vars", "")))
         self.env_edit.setPlaceholderText(
@@ -1638,6 +1670,45 @@ class GameDialog(QDialog):
 
     def _new_prefix(self) -> None:
         self.prefix_edit.setText(db.make_prefix(self.name_edit.text() or "game"))
+        self.winetricks_state = ""
+        self._refresh_winetricks_summary()
+
+    def _refresh_winetricks_summary(self) -> None:
+        try:
+            verbs = normalize_winetricks_verbs(self.winetricks_verbs)
+        except ValueError:
+            verbs = []
+        if verbs:
+            self.winetricks_summary.setText(
+                tr("Komponenty: {verbs}", verbs=" ".join(verbs))
+            )
+        else:
+            self.winetricks_summary.setText(tr("Brak wybranych komponentów."))
+
+    def _manage_winetricks(self) -> None:
+        self.winetricks_auto = self.winetricks_auto_cb.isChecked()
+        snapshot: dict[str, Any] = {
+            "name": self.name_edit.text().strip() or "game",
+            "exe_path": self.exe_edit.text().strip(),
+            "runner_path": str(self.runner_combo.currentData() or ""),
+            "wine_prefix": self.prefix_edit.text().strip(),
+            "env_vars": self.env_edit.toPlainText(),
+            "is_steam": int((self.game or {}).get("is_steam", 0)),
+            "steam_appid": str((self.game or {}).get("steam_appid", "")),
+            "winetricks_verbs": self.winetricks_verbs,
+            "winetricks_auto": 1 if self.winetricks_auto else 0,
+            "winetricks_state": self.winetricks_state,
+        }
+        if self.game and self.game.get("id"):
+            snapshot["id"] = self.game["id"]
+        dialog = WinetricksDialog(self.db, snapshot, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.winetricks_verbs = dialog.verbs_text()
+            self.winetricks_auto = dialog.auto_install()
+            self.winetricks_state = dialog.state()
+            self.prefix_edit.setText(dialog.prefix_path())
+            self.winetricks_auto_cb.setChecked(self.winetricks_auto)
+            self._refresh_winetricks_summary()
 
     def _update_scaling_note(self) -> None:
         key = str(self.scaling_combo.currentData() or "native")
@@ -1724,6 +1795,9 @@ class GameDialog(QDialog):
                 "is_steam": is_steam,
                 "steam_appid": str((self.game or {}).get("steam_appid", "")),
                 "cover_path": cover,
+                "winetricks_verbs": self.winetricks_verbs,
+                "winetricks_auto": 1 if self.winetricks_auto_cb.isChecked() else 0,
+                "winetricks_state": self.winetricks_state,
             }
             if self.game:
                 self.db.update_game(int(self.game["id"]), **values)
@@ -1733,6 +1807,357 @@ class GameDialog(QDialog):
             QMessageBox.warning(self, tr("Nie zapisano"), str(exc))
             return
         self.accept()
+WINETRICKS_PRESETS = (
+    ("physx", "PhysX (starsze gry)"),
+    ("vcrun2022", "Visual C++ 2015–2022"),
+    ("d3dx9", "DirectX 9"),
+    ("xact", "XACT"),
+    ("dotnet48", ".NET Framework 4.8"),
+    ("mf", "Media Foundation"),
+    ("corefonts", "Czcionki Core"),
+)
+
+
+class WinetricksDialog(QDialog):
+    """Per-game Winetricks manager for Wine, Proton and Steam prefixes."""
+
+    def __init__(
+        self,
+        database: Database,
+        game: dict[str, Any],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.db = database
+        self.game = dict(game)
+        self._worker: WinetricksWorker | None = None
+        self._install_worker: WinetricksInstallWorker | None = None
+        self._active_plan: WinetricksPlan | None = None
+        self.setWindowTitle(
+            tr("Winetricks — {name}", name=self.game.get("name") or tr("Gra"))
+        )
+        self.setModal(True)
+        self.resize(780, 760)
+        self.setWindowIcon(app_icon())
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 18, 22, 18)
+        outer.setSpacing(12)
+        kicker = QLabel(tr("NARZĘDZIA // WINETRICKS"))
+        kicker.setObjectName("PageKicker")
+        outer.addWidget(kicker)
+        heading = QLabel(tr("Komponenty Windows"))
+        heading.setObjectName("PageTitle")
+        outer.addWidget(heading)
+        self.mode_label = QLabel("")
+        self.mode_label.setObjectName("Muted")
+        self.mode_label.setWordWrap(True)
+        outer.addWidget(self.mode_label)
+
+        presets = QGroupBox(tr("KOMPONENTY"))
+        presets_layout = QGridLayout(presets)
+        presets_layout.setHorizontalSpacing(18)
+        presets_layout.setVerticalSpacing(8)
+        selected = set()
+        try:
+            selected = set(
+                normalize_winetricks_verbs(str(self.game.get("winetricks_verbs", "")))
+            )
+        except ValueError:
+            selected = set()
+        preset_verbs = {verb for verb, _label in WINETRICKS_PRESETS}
+        self.preset_checks: dict[str, QCheckBox] = {}
+        for index, (verb, label) in enumerate(WINETRICKS_PRESETS):
+            check = QCheckBox(tr(label))
+            check.setChecked(verb in selected)
+            check.toggled.connect(self._refresh_status)
+            self.preset_checks[verb] = check
+            presets_layout.addWidget(check, index // 2, index % 2)
+        presets_layout.addWidget(QLabel(tr("Własne komponenty")), 4, 0, 1, 2)
+        self.custom_edit = QLineEdit(
+            " ".join(sorted(selected - preset_verbs))
+        )
+        self.custom_edit.setPlaceholderText(tr("np. quartz wmp10"))
+        self.custom_edit.textChanged.connect(self._refresh_status)
+        presets_layout.addWidget(self.custom_edit, 5, 0, 1, 2)
+        outer.addWidget(presets)
+
+        self.auto_cb = QCheckBox(
+            tr("Zainstaluj wybrane komponenty przed pierwszym startem gry")
+        )
+        self.auto_cb.setChecked(bool(int(self.game.get("winetricks_auto", 0) or 0)))
+        outer.addWidget(self.auto_cb)
+
+        self.dep_label = QLabel("")
+        self.dep_label.setObjectName("Muted")
+        self.dep_label.setWordWrap(True)
+        outer.addWidget(self.dep_label)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Muted")
+        self.status_label.setWordWrap(True)
+        outer.addWidget(self.status_label)
+
+        actions = QHBoxLayout()
+        self.install_button = QPushButton(tr("ZAINSTALUJ WYBRANE"))
+        self.install_button.setObjectName("PrimaryButton")
+        self.install_button.clicked.connect(self._install_selected)
+        actions.addWidget(self.install_button)
+        self.download_button = QPushButton(tr("ZAINSTALUJ WINETRICKS"))
+        self.download_button.setObjectName("GhostButton")
+        self.download_button.clicked.connect(self._install_winetricks)
+        actions.addWidget(self.download_button)
+        refresh = QPushButton(tr("ODŚWIEŻ STATUS"))
+        refresh.setObjectName("GhostButton")
+        refresh.clicked.connect(self._refresh_status)
+        actions.addWidget(refresh)
+        actions.addStretch(1)
+        close = QPushButton(tr("ZAMKNIJ"))
+        close.setObjectName("GhostButton")
+        close.clicked.connect(self.accept)
+        actions.addWidget(close)
+        outer.addLayout(actions)
+
+        log_title = QLabel(tr("Log instalacji"))
+        log_title.setObjectName("SectionTitle")
+        outer.addWidget(log_title)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(180)
+        outer.addWidget(self.log_view, 1)
+
+        self._refresh_status()
+
+    def _mode_text(self) -> str:
+        if int(self.game.get("is_steam", 0) or 0):
+            return tr(
+                "Steam AppID {appid} — prefiksem zarządza Steam, więc używany "
+                "jest protontricks.",
+                appid=self.game.get("steam_appid", ""),
+            )
+        runner = resolve_runner(
+            str(self.game.get("runner_path", "")),
+            str(self.db.get_setting("default_runner", "")),
+        )
+        prefix = str(self.game.get("wine_prefix", "") or tr("brak"))
+        runner_name = runner.label if runner is not None else tr("brak")
+        return tr(
+            "Runner: {runner}  |  Prefiks: {prefix}",
+            runner=runner_name,
+            prefix=prefix,
+        )
+
+    def _ensure_prefix(self) -> None:
+        if int(self.game.get("is_steam", 0) or 0):
+            return
+        if not str(self.game.get("wine_prefix", "") or "").strip():
+            self.game["wine_prefix"] = db.make_prefix(
+                str(self.game.get("name") or "game")
+            )
+
+    def selected_verbs(self) -> list[str]:
+        verbs = [
+            verb for verb, check in self.preset_checks.items() if check.isChecked()
+        ]
+        verbs.extend(normalize_winetricks_verbs(self.custom_edit.text()))
+        return normalize_winetricks_verbs(verbs)
+
+    def verbs_text(self) -> str:
+        try:
+            return winetricks_verbs_text(self.selected_verbs())
+        except ValueError:
+            return str(self.game.get("winetricks_verbs", ""))
+
+    def auto_install(self) -> bool:
+        return self.auto_cb.isChecked()
+
+    def state(self) -> str:
+        return str(self.game.get("winetricks_state", "") or "")
+
+    def prefix_path(self) -> str:
+        return str(self.game.get("wine_prefix", "") or "")
+
+    def _save_settings(self) -> None:
+        try:
+            verbs = winetricks_verbs_text(self.selected_verbs())
+        except ValueError:
+            return
+        self.game["winetricks_verbs"] = verbs
+        self.game["winetricks_auto"] = 1 if self.auto_cb.isChecked() else 0
+        game_id = self.game.get("id")
+        if game_id:
+            self.db.update_game(
+                int(game_id),
+                wine_prefix=self.prefix_path(),
+                winetricks_verbs=verbs,
+                winetricks_auto=self.game["winetricks_auto"],
+                winetricks_state=self.state(),
+            )
+
+    def _refresh_status(self) -> None:
+        if getattr(self, "install_button", None) is None:
+            return
+        self._ensure_prefix()
+        self.mode_label.setText(self._mode_text())
+        is_steam = bool(int(self.game.get("is_steam", 0) or 0))
+        winetricks = winetricks_path()
+        protontricks = protontricks_path()
+        winetricks_status = (
+            tr("Winetricks: {path}", path=winetricks)
+            if winetricks
+            else tr("Winetricks: brak. Użyj przycisku instalacji poniżej.")
+        )
+        if is_steam:
+            protontricks_status = (
+                tr("Protontricks: {path}", path=protontricks)
+                if protontricks
+                else tr(
+                    "Protontricks: brak. Zainstaluj protontricks, aby używać "
+                    "Winetricks dla gier Steam."
+                )
+            )
+            dependency = f"{protontricks_status}\n{winetricks_status}"
+        else:
+            dependency = winetricks_status
+        self.dep_label.setText(dependency)
+        self.download_button.setVisible(not winetricks)
+        self.download_button.setEnabled(self._install_worker is None)
+        if self._worker is not None or self._install_worker is not None:
+            return
+        try:
+            verbs = self.selected_verbs()
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            self.install_button.setEnabled(False)
+            return
+        if not verbs:
+            self.status_label.setText(tr("Wybierz komponenty do zainstalowania."))
+            self.install_button.setEnabled(False)
+            return
+        try:
+            plan = build_winetricks_plan(self.db, self.game, verbs)
+        except Exception as exc:
+            self.status_label.setText(str(exc))
+            self.install_button.setEnabled(False)
+            return
+        if winetricks_applied(self.game, plan):
+            self.status_label.setText(
+                tr("Wybrane komponenty są już zainstalowane w tym prefiksie.")
+            )
+        else:
+            self.status_label.setText(
+                tr("Wybrane komponenty wymagają instalacji: {verbs}", verbs=" ".join(verbs))
+            )
+        self.install_button.setEnabled(True)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.install_button.setEnabled(not busy)
+        self.download_button.setEnabled(not busy and not self.download_button.isHidden())
+        for check in self.preset_checks.values():
+            check.setEnabled(not busy)
+        self.custom_edit.setEnabled(not busy)
+        self.auto_cb.setEnabled(not busy)
+
+    def _install_winetricks(self) -> None:
+        if self._install_worker is not None:
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Winetricks"),
+            tr("Pobrać oficjalny skrypt Winetricks z GitHuba?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._install_worker = WinetricksInstallWorker(self)
+        self._install_worker.status.connect(self.status_label.setText)
+        self._install_worker.progress.connect(
+            lambda percent: self.status_label.setText(
+                tr("Pobieram Winetricks... {percent}%", percent=percent)
+            )
+        )
+        self._install_worker.result.connect(self._winetricks_installed)
+        self._set_busy(True)
+        self._install_worker.start()
+
+    def _winetricks_installed(self, success: bool, message: str) -> None:
+        worker = self._install_worker
+        self._install_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._set_busy(False)
+        self._refresh_status()
+        if success:
+            QMessageBox.information(
+                self,
+                tr("Winetricks"),
+                tr("Winetricks został zainstalowany:\n{path}", path=message),
+            )
+        else:
+            QMessageBox.warning(self, tr("Winetricks"), message)
+
+    def _install_selected(self) -> None:
+        if self._worker is not None:
+            return
+        try:
+            verbs = self.selected_verbs()
+            plan = build_winetricks_plan(self.db, self.game, verbs)
+        except Exception as exc:
+            QMessageBox.warning(self, tr("Winetricks"), str(exc))
+            self._refresh_status()
+            return
+        self._save_settings()
+        answer = QMessageBox.question(
+            self,
+            tr("Winetricks"),
+            tr(
+                "Zainstalować w tym prefiksie następujące komponenty?\n\n{verbs}",
+                verbs="\n".join(f"• {verb}" for verb in verbs),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._active_plan = plan
+        self._worker = WinetricksWorker(plan, self)
+        self._worker.output.connect(self.log_view.appendPlainText)
+        self._worker.result.connect(self._winetricks_finished)
+        self._set_busy(True)
+        self.status_label.setText(tr("Instaluję komponenty Winetricks..."))
+        self.log_view.clear()
+        self._worker.start()
+
+    def _winetricks_finished(self, success: bool, message: str) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._set_busy(False)
+        plan = self._active_plan
+        self._active_plan = None
+        if success and plan is not None:
+            self.game["winetricks_state"] = plan.state
+            self._save_settings()
+            self.status_label.setText(tr("Komponenty Winetricks zostały zainstalowane."))
+            QMessageBox.information(
+                self,
+                tr("Winetricks"),
+                tr("Komponenty zostały zainstalowane.\n\nLog: {path}", path=message),
+            )
+        else:
+            self.status_label.setText(message)
+            QMessageBox.warning(self, tr("Winetricks"), message)
+        self._refresh_status()
+
+    def done(self, result: int) -> None:  # noqa: A003
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker.wait(5000)
+        if self._install_worker is not None:
+            self._install_worker.wait(5000)
+        self._save_settings()
+        super().done(result)
+
+
 class SettingsPage(QWidget):
     toast = pyqtSignal(str)
     steam_sync_requested = pyqtSignal()
@@ -1751,6 +2176,7 @@ class SettingsPage(QWidget):
         self._dep_failures: list[str] = []
         self._m32_process: QProcess | None = None
         self._gamepad_process: QProcess | None = None
+        self._winetricks_install_worker: WinetricksInstallWorker | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 24, 28, 20)
         outer.setSpacing(16)
@@ -1938,6 +2364,10 @@ class SettingsPage(QWidget):
         self.install_m32_button.setObjectName("GhostButton")
         self.install_m32_button.clicked.connect(self._install_mangohud32)
         deps_actions.addWidget(self.install_m32_button)
+        self.install_winetricks_button = QPushButton(tr("ZAINSTALUJ WINETRICKS"))
+        self.install_winetricks_button.setObjectName("GhostButton")
+        self.install_winetricks_button.clicked.connect(self._install_winetricks)
+        deps_actions.addWidget(self.install_winetricks_button)
         self.gamepad_udev_button = QPushButton(tr("WŁĄCZ OBSŁUGĘ PADA"))
         self.gamepad_udev_button.setObjectName("GhostButton")
         self.gamepad_udev_button.clicked.connect(self._install_gamepad_udev)
@@ -2170,6 +2600,24 @@ class SettingsPage(QWidget):
             f"{html.escape(m32) if m32 else tr('brak — wymagany dla gier PE32')}"
             "</span>"
         )
+        winetricks = winetricks_path()
+        protontricks = protontricks_path()
+        rows.append(
+            f"<span style='color:{'#42F5A7' if winetricks else '#FFB347'}'>"
+            f"{'●' if winetricks else '○'}</span> "
+            f"<b>Winetricks</b> "
+            f"<span style='color:#69808B'>"
+            f"{html.escape(winetricks) if winetricks else tr('brak')}"
+            "</span>"
+        )
+        rows.append(
+            f"<span style='color:{'#42F5A7' if protontricks else '#FFB347'}'>"
+            f"{'●' if protontricks else '○'}</span> "
+            f"<b>Protontricks</b> "
+            f"<span style='color:#69808B'>"
+            f"{html.escape(protontricks) if protontricks else tr('brak (opcjonalnie dla gier Steam)')}"
+            "</span>"
+        )
         rows.append(
             f"<span style='color:#69808B'>"
             f"{tr('Menedżer pakietów: {manager}', manager=package_manager() or tr('nie wykryto'))}"
@@ -2196,6 +2644,14 @@ class SettingsPage(QWidget):
         )
         self.install_m32_button.setEnabled(
             not has_m32 and self._m32_process is None
+        )
+        self.install_winetricks_button.setText(
+            tr("WINETRICKS: OK")
+            if winetricks
+            else tr("ZAINSTALUJ WINETRICKS")
+        )
+        self.install_winetricks_button.setEnabled(
+            not winetricks and self._winetricks_install_worker is None
         )
 
     def _install_dependencies(self) -> None:
@@ -2368,6 +2824,45 @@ class SettingsPage(QWidget):
         process.finished.connect(self._m32_finished)
         process.errorOccurred.connect(self._m32_error)
         process.start()
+
+    def _install_winetricks(self) -> None:
+        if self._winetricks_install_worker is not None:
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Winetricks"),
+            tr("Pobrać oficjalny skrypt Winetricks z GitHuba?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._winetricks_install_worker = WinetricksInstallWorker(self)
+        self._winetricks_install_worker.status.connect(self.deps_output.setText)
+        self._winetricks_install_worker.progress.connect(
+            lambda percent: self.deps_output.setText(
+                tr("Pobieram Winetricks... {percent}%", percent=percent)
+            )
+        )
+        self._winetricks_install_worker.result.connect(
+            self._winetricks_install_finished
+        )
+        self.install_winetricks_button.setEnabled(False)
+        self._winetricks_install_worker.start()
+
+    def _winetricks_install_finished(self, success: bool, message: str) -> None:
+        worker = self._winetricks_install_worker
+        self._winetricks_install_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._refresh_deps()
+        if success:
+            self.deps_output.setText(
+                tr("Winetricks zainstalowany: {path}", path=message)
+            )
+            self.toast.emit(tr("Winetricks został zainstalowany."))
+        else:
+            self.deps_output.setText(message)
+            QMessageBox.warning(self, tr("Winetricks"), message)
 
     def _read_m32_output(self) -> None:
         process = self._m32_process
@@ -3553,6 +4048,13 @@ class MainWindow(QMainWindow):
         self._active_process: QProcess | None = None
         self._active_game: dict[str, Any] | None = None
         self._minimized_for_game = False
+        self._console_return_pending = False
+        self._console_monitor = 0
+        self._steam_watch_timer: QTimer | None = None
+        self._steam_watch_game: dict[str, Any] | None = None
+        self._steam_watch_seen = False
+        self._steam_watch_misses = 0
+        self._steam_watch_ticks = 0
         self._steam_game_name = ""
         self._was_window_visible = True
         self._was_maximized = False
@@ -3920,12 +4422,30 @@ class MainWindow(QMainWindow):
         self.console.open_on_screen(self.db.get_int("console_monitor", 0))
 
     def _console_launch(self, game_id: int) -> None:
-        if self.console is not None:
-            self.console.hide()
-        self.library_page.set_console_active(False)
+        self._console_return_pending = True
+        self._console_monitor = (
+            self.console._monitor_index if self.console is not None else 0
+        )
         self.start_game(game_id)
+        if (
+            self._active_process is None
+            and self._steam_watch_game is None
+            and not self._steam_game_name
+        ):
+            # The launch was cancelled (for example by a Winetricks prompt).
+            self._console_return_pending = False
+
+    def _return_to_console(self) -> None:
+        if self.console is None:
+            self.open_console()
+            return
+        self.library_page.set_console_active(True)
+        self.hide()
+        self.console.reload()
+        self.console.open_on_screen(self._console_monitor)
 
     def _console_edit(self, game_id: int) -> None:
+        self._console_return_pending = False
         if self.console is not None:
             self.console.hide()
         self.library_page.set_console_active(False)
@@ -3933,6 +4453,7 @@ class MainWindow(QMainWindow):
         self.edit_game(game_id)
 
     def _console_closed(self) -> None:
+        self._console_return_pending = False
         self.library_page.set_console_active(False)
         self.show_window()
 
@@ -4188,12 +4709,32 @@ class MainWindow(QMainWindow):
         folder.triggered.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_target)))
         )
+        winetricks = menu.addAction(tr("Winetricks…"))
+        winetricks.triggered.connect(lambda: self.open_winetricks(game_id))
         cache = menu.addAction(tr("Wyczyść shader cache tej gry"))
         cache.triggered.connect(lambda: self.clear_cache_for_game(game_id))
         menu.addSeparator()
         delete = menu.addAction(tr("×  Usuń z biblioteki"))
         delete.triggered.connect(lambda: self.delete_game(game_id))
         menu.exec(position)
+
+    def open_winetricks(self, game_id: int) -> None:
+        game = self.db.get_game(game_id)
+        if not game:
+            self.toast(tr("Nie znaleziono gry w bibliotece."))
+            return
+        dialog = WinetricksDialog(self.db, game, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.db.update_game(
+                int(game_id),
+                wine_prefix=dialog.prefix_path(),
+                winetricks_verbs=dialog.verbs_text(),
+                winetricks_auto=1 if dialog.auto_install() else 0,
+                winetricks_state=dialog.state(),
+            )
+            self.library_page.reload()
+            self._refresh_tray_menu()
+            self.toast(tr("Konfiguracja Winetricks zapisana."))
 
     def _copy_steam_option_for(self) -> None:
         try:
@@ -4262,6 +4803,115 @@ class MainWindow(QMainWindow):
             game = dict(game, wine_prefix=prefix)
         return write_runtime_file(self.db, game)
 
+    def _ensure_game_prefix(self, game: dict[str, Any]) -> dict[str, Any]:
+        if int(game.get("is_steam", 0) or 0):
+            return game
+        if not str(game.get("wine_prefix", "") or "").strip():
+            prefix = db.make_prefix(str(game.get("name", "game")))
+            self.db.update_game(int(game["id"]), wine_prefix=prefix)
+            return dict(game, wine_prefix=prefix)
+        return game
+
+    def _dialog_parent(self) -> QWidget:
+        console = getattr(self, "console", None)
+        if console is not None and console.isVisible():
+            return console
+        return self
+
+    def _run_winetricks_modal(self, game: dict[str, Any], plan: WinetricksPlan) -> bool:
+        dialog_parent = self._dialog_parent()
+        progress = QProgressDialog(
+            tr("Instaluję komponenty Winetricks..."),
+            tr("Anuluj"),
+            0,
+            0,
+            dialog_parent,
+        )
+        progress.setWindowTitle(tr("Winetricks"))
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        worker = WinetricksWorker(plan, self)
+        loop = QEventLoop()
+        outcome: dict[str, Any] = {"success": False, "message": ""}
+
+        def finished(success: bool, message: str) -> None:
+            outcome["success"] = success
+            outcome["message"] = message
+            loop.quit()
+
+        worker.result.connect(finished)
+        worker.output.connect(
+            lambda line: progress.setLabelText(line[-240:] or tr("Winetricks..."))
+        )
+        progress.canceled.connect(worker.cancel)
+        worker.start()
+        progress.show()
+        loop.exec()
+        worker.wait(5000)
+        progress.close()
+        progress.deleteLater()
+        worker.deleteLater()
+        if outcome["success"]:
+            self.db.update_game(
+                int(game["id"]), winetricks_state=plan.state
+            )
+            self.toast(tr("Komponenty Winetricks zostały zainstalowane."))
+            return True
+        answer = QMessageBox.warning(
+            dialog_parent,
+            tr("Winetricks"),
+            tr(
+                "Nie udało się zainstalować komponentów Winetricks.\n\n{error}\n\n"
+                "Uruchomić grę mimo to?",
+                error=outcome["message"],
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _maybe_prepare_winetricks(self, game: dict[str, Any]) -> bool:
+        if not int(game.get("winetricks_auto", 0) or 0):
+            return True
+        dialog_parent = self._dialog_parent()
+        try:
+            verbs = normalize_winetricks_verbs(str(game.get("winetricks_verbs", "")))
+        except ValueError as exc:
+            QMessageBox.warning(dialog_parent, tr("Winetricks"), str(exc))
+            return True
+        if not verbs:
+            return True
+        try:
+            plan = build_winetricks_plan(self.db, game, verbs)
+        except Exception as exc:
+            answer = QMessageBox.warning(
+                dialog_parent,
+                tr("Winetricks"),
+                tr(
+                    "Nie można przygotować Winetricks:\n\n{error}\n\n"
+                    "Uruchomić grę mimo to?",
+                    error=exc,
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            return answer == QMessageBox.StandardButton.Yes
+        if winetricks_applied(game, plan):
+            return True
+        answer = QMessageBox.question(
+            dialog_parent,
+            tr("Winetricks"),
+            tr(
+                "Ta gra ma włączoną automatyczną instalację komponentów.\n\n"
+                "Zainstalować teraz: {verbs}?",
+                verbs=" ".join(verbs),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        return self._run_winetricks_modal(game, plan)
+
     def start_game(self, game_id: int) -> None:
         if self._active_process is not None:
             self.toast(tr("Gra już działa. Zakończ bieżący proces przed startem kolejnej."))
@@ -4269,6 +4919,9 @@ class MainWindow(QMainWindow):
         game = self.db.get_game(int(game_id))
         if not game:
             self.toast(tr("Nie znaleziono gry w bibliotece."))
+            return
+        game = self._ensure_game_prefix(game)
+        if not self._maybe_prepare_winetricks(game):
             return
         if self.console is not None and self.console.isVisible():
             self.console.hide()
@@ -4280,7 +4933,7 @@ class MainWindow(QMainWindow):
             runtime = self._stage_runtime(game)
         except Exception as exc:
             log.error("Cannot prepare launch: %s", exc)
-            QMessageBox.warning(self, tr("Nie można uruchomić"), str(exc))
+            QMessageBox.warning(self._dialog_parent(), tr("Nie można uruchomić"), str(exc))
             return
 
         bits = exe_bits(str(game.get("exe_path", "")))
@@ -4662,7 +5315,76 @@ class MainWindow(QMainWindow):
             [], wrapper, restore=True, title="Steam backup"
         )
 
+    def _start_steam_watch(self, game: dict[str, Any]) -> None:
+        if not self._console_return_pending:
+            return
+        appid = str(game.get("steam_appid", "") or "").strip()
+        if not appid:
+            return
+        self._stop_steam_watch()
+        self._steam_watch_game = dict(game)
+        self._steam_watch_seen = False
+        self._steam_watch_misses = 0
+        self._steam_watch_ticks = 0
+        timer = QTimer(self)
+        timer.setInterval(900)
+        timer.timeout.connect(self._poll_steam_watch)
+        self._steam_watch_timer = timer
+        timer.start()
+
+    def _stop_steam_watch(self) -> None:
+        if self._steam_watch_timer is not None:
+            self._steam_watch_timer.stop()
+            self._steam_watch_timer.deleteLater()
+            self._steam_watch_timer = None
+        self._steam_watch_game = None
+        self._steam_watch_seen = False
+        self._steam_watch_misses = 0
+        self._steam_watch_ticks = 0
+
+    def _poll_steam_watch(self) -> None:
+        game = self._steam_watch_game
+        if game is None:
+            self._stop_steam_watch()
+            return
+        self._steam_watch_ticks += 1
+        appid = str(game.get("steam_appid", "") or "")
+        running = steam_game_process_running(
+            appid, str(game.get("exe_path", "") or "")
+        )
+        if running:
+            self._steam_watch_seen = True
+            self._steam_watch_misses = 0
+            return
+        if self._steam_watch_seen:
+            self._steam_watch_misses += 1
+            if self._steam_watch_misses < 3:
+                return
+            name = str(game.get("name", self._steam_game_name or tr("Gra")))
+            self._stop_steam_watch()
+            self._steam_game_name = ""
+            self._refresh_tray_menu()
+            self._update_sidebar_state()
+            self.status_label.setText(
+                tr("ZAKOŃCZONO // {name}", name=name)
+            )
+            if self._console_return_pending:
+                self._console_return_pending = False
+                self._return_to_console()
+            return
+        if self._steam_watch_ticks >= 240:
+            # Never insist forever if Steam did not expose the game process.
+            self._stop_steam_watch()
+
     def _minimize_after_launch(self, game: dict[str, Any]) -> None:
+        if self._console_return_pending:
+            if self.console is not None:
+                self.console.hide()
+            self.library_page.set_console_active(False)
+            self._refresh_tray_menu()
+            if int(game.get("is_steam", 0) or 0):
+                self._start_steam_watch(game)
+            return
         if not self.db.get_bool("ghost_mode", True):
             return
         self._was_window_visible = self.isVisible()
@@ -4695,10 +5417,14 @@ class MainWindow(QMainWindow):
         if process is not self._active_process:
             return
         game = self._active_game or {}
+        console_return = self._console_return_pending
+        self._console_return_pending = False
         self._active_process = None
         self._active_game = None
         process.deleteLater()
-        if self._minimized_for_game:
+        if console_return:
+            self._minimized_for_game = False
+        elif self._minimized_for_game:
             self._minimized_for_game = False
             if self._was_window_visible:
                 self.show_window()
@@ -4716,7 +5442,7 @@ class MainWindow(QMainWindow):
         )
         self._update_sidebar_state()
         self._refresh_tray_menu()
-        if self.tray is not None:
+        if self.tray is not None and not console_return:
             self.tray.showMessage(
                 tr("{app} // koniec gry", app=APP_NAME),
                 tr(
@@ -4727,6 +5453,8 @@ class MainWindow(QMainWindow):
                 QSystemTrayIcon.MessageIcon.Information,
                 2600,
             )
+        if console_return:
+            self._return_to_console()
 
     def _on_game_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
         if process is not self._active_process:
@@ -4734,18 +5462,26 @@ class MainWindow(QMainWindow):
         if error != QProcess.ProcessError.FailedToStart:
             self.status_label.setText(tr("BŁĄD PROCESU // {error}", error=error.name))
             return
+        console_return = self._console_return_pending
+        self._console_return_pending = False
         self._active_process = None
         self._active_game = None
         self._minimized_for_game = False
         process.deleteLater()
-        self.show_window()
+        if not console_return:
+            self.show_window()
         self._update_sidebar_state()
         self._refresh_tray_menu()
+        warning_parent = (
+            self.console if console_return and self.console is not None else self
+        )
         QMessageBox.warning(
-            self,
+            warning_parent,
             tr("Błąd uruchamiania"),
             tr("Nie udało się uruchomić launcher.sh. Sprawdź uprawnienia i log."),
         )
+        if console_return:
+            self._return_to_console()
 
     def stop_game(self) -> None:
         process = self._active_process

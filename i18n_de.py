@@ -29,7 +29,6 @@ TRANSLATIONS: dict[str, str] = {
     "BIG PICTURE": "BIG PICTURE",
     "BL": "BL",
     "BOOSTLAYER": "BOOSTLAYER",
-    "BOOSTLAYER // CONSOLE": "BOOSTLAYER // CONSOLE",
     "Backup localconfig.vdf przywrócony.": "Backup von localconfig.vdf wiederhergestellt.",
     "Bez limitu": "Kein Limit",
     "Biblioteka": "Bibliothek",
@@ -55,7 +54,6 @@ TRANSLATIONS: dict[str, str] = {
     "CPU": "CPU",
     "CPU load / clock": "CPU load / clock",
     "Część instalacji nie powiodła się:\n\n{failures}\n\nNa Ubuntu 24.04 pakiet gamescope może nie być dostępny w repozytorium. Pozostałe narzędzia zainstalowały się niezależnie.": "Ein Teil der Installation ist fehlgeschlagen:\n\n{failures}\n\nUnter Ubuntu 24.04 ist das Paket gamescope möglicherweise nicht im Repository verfügbar. Die übrigen Werkzeuge wurden unabhängig davon installiert.",
-    "D-PAD / LEWA GAŁKA — wybór     A — graj     B — wyjdź     X — edytuj     Y — odśwież     START — wyjdź": "D-PAD / LINKER STICK — Auswahl     A — Spielen     B — Beenden     X — Bearbeiten     Y — Aktualisieren     START — Beenden",
     "DOMYŚLNY RUNNER DLA NOWYCH GIER": "STANDARD-RUNNER FÜR NEUE SPIELE",
     "DXVK_HUD=0\nWINE_FULLSCREEN_FSR=1\nMESA_VK_WSI_PRESENT_MODE=mailbox": "DXVK_HUD=0\nWINE_FULLSCREEN_FSR=1\nMESA_VK_WSI_PRESENT_MODE=mailbox",
     "Debug: zapis do last_run.log": "Debug: in last_run.log schreiben",
@@ -486,7 +484,6 @@ TRANSLATIONS.update(
 
 TRANSLATIONS.update({"Scaling: {label}": "Skalierung: {label}"})
 
-TRANSLATIONS.update({"Skalowanie: {label}": "Skalierung: {label}"})
 
 TRANSLATIONS.update(
     {
@@ -524,3 +521,93 @@ TRANSLATIONS.update(
 )
 
 TRANSLATIONS.update({"Bez nazwy": "Unbenannt"})
+
+TRANSLATIONS.update(
+    {
+        "Anuluj": "Abbrechen",
+        "Auto przed startem": "Auto vor dem Start",
+        "Brak AppID Steam dla tej gry.": "Keine Steam-AppID für dieses Spiel.",
+        "Brak wybranych komponentów.": "Keine Komponenten ausgewählt.",
+        "Gra nie ma ustawionego WINEPREFIX.": "Für das Spiel ist kein WINEPREFIX konfiguriert.",
+        "Instalacja Winetricks została anulowana.": "Winetricks-Installation wurde abgebrochen.",
+        "Instaluję komponenty Winetricks...": "Winetricks-Komponenten werden installiert...",
+        "KOMPONENTY": "KOMPONENTEN",
+        "Komponenty Windows": "Windows-Komponenten",
+        "Komponenty Winetricks zostały zainstalowane.": "Winetricks-Komponenten wurden installiert.",
+        "Komponenty zostały zainstalowane.\n\nLog: {path}": "Komponenten wurden installiert.\n\nLog: {path}",
+        "Komponenty: {verbs}": "Komponenten: {verbs}",
+        "Konfiguracja Winetricks zapisana.": "Winetricks-Konfiguration gespeichert.",
+        "Log instalacji": "Installationslog",
+        "NARZĘDZIA // WINETRICKS": "WERKZEUGE // WINETRICKS",
+        "Nie można odczytać pobranego Winetricks.": "Das heruntergeladene Winetricks konnte nicht gelesen werden.",
+        "Nie można przygotować Winetricks:\n\n{error}\n\nUruchomić grę mimo to?": "Winetricks konnte nicht vorbereitet werden:\n\n{error}\n\nSpiel trotzdem starten?",
+        "Nie udało się zainstalować komponentów Winetricks.\n\n{error}\n\nUruchomić grę mimo to?": "Winetricks-Komponenten konnten nicht installiert werden.\n\n{error}\n\nSpiel trotzdem starten?",
+        "Nie znaleziono programu Winetricks.": "Winetricks-Programm nicht gefunden.",
+        "Nieprawidłowa nazwa komponentu Winetricks: {verb}": "Ungültiger Winetricks-Komponentenname: {verb}",
+        "Pobieram Winetricks...": "Winetricks wird heruntergeladen...",
+        "Pobieram Winetricks... {percent}%": "Winetricks wird heruntergeladen... {percent}%",
+        "Pobrany plik nie wygląda na Winetricks.": "Die heruntergeladene Datei sieht nicht wie Winetricks aus.",
+        "Protontricks nie jest zainstalowany. Zainstaluj go, aby używać Winetricks dla gier Steam.": "Protontricks ist nicht installiert. Installiere es, um Winetricks für Steam-Spiele zu verwenden.",
+        "Protontricks: brak. Zainstaluj protontricks, aby używać Winetricks dla gier Steam.": "Protontricks: fehlt. Installiere protontricks, um Winetricks für Steam-Spiele zu verwenden.",
+        "Protontricks: {path}": "Protontricks: {path}",
+        "Runner: {runner}  |  Prefiks: {prefix}": "Runner: {runner}  |  Präfix: {prefix}",
+        "Steam AppID {appid} — prefiksem zarządza Steam, więc używany jest protontricks.": "Steam-AppID {appid} — das Präfix wird von Steam verwaltet, daher wird protontricks verwendet.",
+        "Ta gra ma włączoną automatyczną instalację komponentów.\n\nZainstalować teraz: {verbs}?": "Für dieses Spiel ist die automatische Komponenteninstallation aktiviert.\n\nJetzt installieren: {verbs}?",
+        "WINETRICKS: OK": "WINETRICKS: OK",
+        "Winetricks": "Winetricks",
+        "Winetricks nie jest zainstalowany. Zainstaluj go w Ustawieniach → Zależności.": "Winetricks ist nicht installiert. Installiere es unter Einstellungen → Abhängigkeiten.",
+        "Winetricks zainstalowany: {path}": "Winetricks installiert: {path}",
+        "Winetricks zakończył się kodem {code}. Log: {path}": "Winetricks endete mit Code {code}. Log: {path}",
+        "Winetricks został zainstalowany.": "Winetricks wurde installiert.",
+        "Winetricks został zainstalowany:\n{path}": "Winetricks wurde installiert:\n{path}",
+        "Winetricks — {name}": "Winetricks — {name}",
+        "Winetricks...": "Winetricks...",
+        "Winetricks: brak. Użyj przycisku instalacji poniżej.": "Winetricks: fehlt. Nutze die Installationsschaltfläche unten.",
+        "Winetricks: {path}": "Winetricks: {path}",
+        "Winetricks…": "Winetricks…",
+        "Wybierz co najmniej jeden komponent Winetricks.": "Wähle mindestens eine Winetricks-Komponente.",
+        "Wybierz komponenty do zainstalowania.": "Wähle Komponenten zum Installieren.",
+        "Wybrane komponenty są już zainstalowane w tym prefiksie.": "Die ausgewählten Komponenten sind in diesem Präfix bereits installiert.",
+        "Wybrane komponenty wymagają instalacji: {verbs}": "Die ausgewählten Komponenten müssen installiert werden: {verbs}",
+        "Własne komponenty": "Eigene Komponenten",
+        "ZAINSTALUJ WINETRICKS": "WINETRICKS INSTALLIEREN",
+        "ZAINSTALUJ WYBRANE": "AUSGEWÄHLTE INSTALLIEREN",
+        "ZAMKNIJ": "SCHLIESSEN",
+        "Zainstalować w tym prefiksie następujące komponenty?\n\n{verbs}": "Folgende Komponenten in diesem Präfix installieren?\n\n{verbs}",
+        "Zainstaluj wybrane komponenty przed pierwszym startem gry": "Ausgewählte Komponenten vor dem ersten Spielstart installieren",
+        "Zarządzaj…": "Verwalten…",
+        "brak": "fehlt",
+        "brak (opcjonalnie dla gier Steam)": "fehlt (optional für Steam-Spiele)",
+        "np. quartz wmp10": "z. B. quartz wmp10",
+    }
+)
+
+TRANSLATIONS.update(
+    {
+        "PhysX (starsze gry)": "PhysX (ältere Spiele)",
+        "Visual C++ 2015–2022": "Visual C++ 2015–2022",
+        "DirectX 9": "DirectX 9",
+        "XACT": "XACT",
+        ".NET Framework 4.8": ".NET Framework 4.8",
+        "Media Foundation": "Media Foundation",
+        "Czcionki Core": "Core-Schriftarten",
+    }
+)
+
+TRANSLATIONS.update({"Pobrać oficjalny skrypt Winetricks z GitHuba?": "Offizielles Winetricks-Skript von GitHub herunterladen?"})
+
+TRANSLATIONS.update(
+    {
+        "BOOSTLAYER // BIG PICTURE": "BOOSTLAYER // BIG PICTURE",
+        "Graj": "Spielen",
+        "KONSOLA GIER": "SPIELKONSOLE",
+        "Naciśnij A, aby uruchomić, lub X, aby edytować.": "Drücke A zum Spielen oder X zum Bearbeiten.",
+        "Odśwież": "Aktualisieren",
+        "Runner: {name}": "Runner: {name}",
+        "STANDALONE": "STANDALONE",
+        "WYBRANA GRA": "AUSGEWÄHLTES SPIEL",
+        "Wyjdź": "Beenden",
+        "ZAKOŃCZONO // {name}": "BEENDET // {name}",
+        "{fps} FPS": "{fps} FPS",
+    }
+)

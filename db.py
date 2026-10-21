@@ -157,6 +157,9 @@ LIBRARY_FIELDS = (
     "is_steam",
     "steam_appid",
     "cover_path",
+    "winetricks_verbs",
+    "winetricks_auto",
+    "winetricks_state",
 )
 
 
@@ -345,7 +348,10 @@ class Database:
                     fps_limit    INTEGER NOT NULL DEFAULT 0,
                     is_steam     INTEGER NOT NULL DEFAULT 0,
                     steam_appid  TEXT NOT NULL DEFAULT '',
-                    cover_path   TEXT NOT NULL DEFAULT ''
+                    cover_path   TEXT NOT NULL DEFAULT '',
+                    winetricks_verbs TEXT NOT NULL DEFAULT '',
+                    winetricks_auto  INTEGER NOT NULL DEFAULT 0,
+                    winetricks_state TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_library_name
@@ -354,10 +360,28 @@ class Database:
                     ON library(steam_appid);
                 """
             )
+            self._migrate_schema()
             for key, value in DEFAULT_SETTINGS.items():
                 self._conn.execute(
                     "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
                     (key, value),
+                )
+
+    def _migrate_schema(self) -> None:
+        """Add columns introduced after the first public database format."""
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(library)").fetchall()
+        }
+        additions = {
+            "winetricks_verbs": "TEXT NOT NULL DEFAULT ''",
+            "winetricks_auto": "INTEGER NOT NULL DEFAULT 0",
+            "winetricks_state": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE library ADD COLUMN {name} {definition}"
                 )
 
     def close(self) -> None:
@@ -432,6 +456,9 @@ class Database:
         data["fps_limit"] = int(data.get("fps_limit", 0))
         data["is_steam"] = int(bool(data.get("is_steam", 0)))
         data["steam_appid"] = str(data.get("steam_appid") or "")
+        data["winetricks_verbs"] = str(data.get("winetricks_verbs") or "")
+        data["winetricks_auto"] = int(bool(data.get("winetricks_auto", 0)))
+        data["winetricks_state"] = str(data.get("winetricks_state") or "")
         return data
 
     def list_games(self, search: str = "") -> list[dict[str, Any]]:
@@ -481,11 +508,13 @@ class Database:
         if data["fps_limit"] not in FPS_LIMITS:
             data["fps_limit"] = 0
         data["is_steam"] = 1 if data["is_steam"] else 0
+        data["winetricks_auto"] = 1 if data["winetricks_auto"] else 0
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "INSERT INTO library(name, exe_path, runner_path, wine_prefix, "
                 "env_vars, launch_args, scaling_mode, fps_limit, is_steam, "
-                "steam_appid, cover_path) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "steam_appid, cover_path, winetricks_verbs, winetricks_auto, "
+                "winetricks_state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     data["name"],
                     data["exe_path"],
@@ -498,6 +527,9 @@ class Database:
                     data["is_steam"],
                     str(data["steam_appid"]),
                     data["cover_path"],
+                    str(data["winetricks_verbs"]),
+                    data["winetricks_auto"],
+                    str(data["winetricks_state"]),
                 ),
             )
         return int(cursor.lastrowid)
@@ -520,6 +552,8 @@ class Database:
                 allowed["fps_limit"] = 0
         if "is_steam" in allowed:
             allowed["is_steam"] = 1 if allowed["is_steam"] else 0
+        if "winetricks_auto" in allowed:
+            allowed["winetricks_auto"] = 1 if allowed["winetricks_auto"] else 0
         assignments = ", ".join(f"{field} = ?" for field in allowed)
         params = list(allowed.values()) + [int(game_id)]
         with self._lock, self._conn:

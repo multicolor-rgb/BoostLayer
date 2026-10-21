@@ -7,10 +7,35 @@ import time
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QObject, QSocketNotifier, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QGuiApplication, QIcon, QKeyEvent
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSocketNotifier,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QIcon,
+    QKeyEvent,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListView,
@@ -19,6 +44,9 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSizePolicy,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +54,9 @@ from PyQt6.QtWidgets import (
 from core import app_icon
 from db import Database, scaling_label
 from i18n import tr
+from theme import get_theme
+
+SOURCE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 def parse_js_event(data: bytes) -> tuple[int, int, int] | None:
@@ -133,6 +164,98 @@ class GamepadManager(QObject):
                 self.axis.emit(number, max(-1.0, min(1.0, value / 32767.0)))
 
 
+class ConsoleGameDelegate(QStyledItemDelegate):
+    """Cinematic game tile: rounded art, glow, title and source badge."""
+
+    def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # noqa: N802
+        return QSize(258, 384)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        theme = get_theme()
+        rect = QRectF(option.rect.adjusted(7, 7, -7, -7))
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        card = QPainterPath()
+        card.addRoundedRect(rect, 15, 15)
+        if selected:
+            glow = QPainterPath()
+            glow.addRoundedRect(rect.adjusted(-3, -3, 3, 3), 18, 18)
+            glow_color = QColor(theme.accent)
+            glow_color.setAlpha(55)
+            painter.fillPath(glow, glow_color)
+        painter.fillPath(
+            card,
+            QColor(theme.panel_alt if selected else theme.panel),
+        )
+        border = theme.accent if selected else (theme.accent_dim if hovered else theme.border)
+        painter.setPen(QPen(QColor(border), 2.0 if selected else 1.0))
+        painter.drawPath(card)
+
+        cover_rect = QRectF(rect.left() + 13, rect.top() + 13, rect.width() - 26, rect.height() - 72)
+        cover_path = QPainterPath()
+        cover_path.addRoundedRect(cover_rect, 10, 10)
+        painter.save()
+        painter.setClipPath(cover_path)
+        icon = index.data(Qt.ItemDataRole.DecorationRole)
+        pixmap = icon.pixmap(QSize(420, 540)) if isinstance(icon, QIcon) else QPixmap()
+        if pixmap.isNull():
+            pixmap = app_icon(180).pixmap(180, 180)
+        scaled = pixmap.scaled(
+            cover_rect.size().toSize(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        source_x = max(0, (scaled.width() - int(cover_rect.width())) // 2)
+        source_y = max(0, (scaled.height() - int(cover_rect.height())) // 2)
+        painter.setOpacity(1.0 if selected else 0.88)
+        painter.drawPixmap(
+            cover_rect.toRect(),
+            scaled,
+            QRect(source_x, source_y, int(cover_rect.width()), int(cover_rect.height())),
+        )
+        painter.setOpacity(1.0)
+        overlay = QLinearGradient(0, cover_rect.top(), 0, cover_rect.bottom())
+        overlay.setColorAt(0.62, QColor(0, 0, 0, 0))
+        overlay.setColorAt(1.0, QColor(0, 0, 0, 175))
+        painter.fillRect(cover_rect, overlay)
+        painter.restore()
+
+        source = str(index.data(SOURCE_ROLE) or "")
+        if source:
+            badge_font = QFont("DejaVu Sans Mono", 7, QFont.Weight.Bold)
+            painter.setFont(badge_font)
+            metrics = QFontMetrics(badge_font)
+            badge_width = metrics.horizontalAdvance(source) + 16
+            badge_rect = QRectF(
+                cover_rect.left() + 9,
+                cover_rect.top() + 9,
+                badge_width,
+                20,
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(5, 13, 17, 200))
+            painter.drawRoundedRect(badge_rect, 5, 5)
+            painter.setPen(QColor(theme.accent))
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, source)
+
+        title = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        title_font = QFont("DejaVu Sans", 10, QFont.Weight.DemiBold)
+        painter.setFont(title_font)
+        painter.setPen(QColor(theme.text if selected else theme.muted))
+        metrics = QFontMetrics(title_font)
+        title_text = metrics.elidedText(title, Qt.TextElideMode.ElideRight, int(rect.width() - 28))
+        painter.drawText(
+            QRectF(rect.left() + 14, rect.bottom() - 47, rect.width() - 28, 30),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            title_text,
+        )
+        painter.restore()
+
+
 class ConsoleWindow(QMainWindow):
     launch_requested = pyqtSignal(int)
     edit_requested = pyqtSignal(int)
@@ -142,7 +265,9 @@ class ConsoleWindow(QMainWindow):
         super().__init__(parent)
         self.db = database
         self._games: list[dict[str, Any]] = []
-        self._cover_size = QSize(220, 310)
+        self._cover_size = QSize(232, 318)
+        self._backdrop_source: QPixmap | None = None
+        self._details_animation: QPropertyAnimation | None = None
         self._last_axis_at: dict[int, float] = {}
         self._monitor_index = 0
         self.setWindowTitle(tr("Boostlayer Console"))
@@ -154,7 +279,18 @@ class ConsoleWindow(QMainWindow):
 
         root = QWidget()
         root.setObjectName("ConsoleRoot")
+        root.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        root.setAutoFillBackground(False)
         self.setCentralWidget(root)
+        self.backdrop = QLabel(root)
+        self.backdrop.setObjectName("ConsoleBackdrop")
+        self.backdrop.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._backdrop_effect = QGraphicsOpacityEffect(self.backdrop)
+        self._backdrop_effect.setOpacity(0.36)
+        self.backdrop.setGraphicsEffect(self._backdrop_effect)
+        self.shade = QFrame(root)
+        self.shade.setObjectName("ConsoleShade")
+        self.shade.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(34, 22, 34, 20)
         layout.setSpacing(16)
@@ -162,19 +298,32 @@ class ConsoleWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("ConsoleHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(2, 0, 2, 0)
-        brand = QLabel(tr("BOOSTLAYER // CONSOLE"))
+        header_layout.setContentsMargins(16, 8, 16, 8)
+        brand_box = QVBoxLayout()
+        brand_box.setSpacing(0)
+        brand = QLabel(tr("BOOSTLAYER // BIG PICTURE"))
         brand.setObjectName("ConsoleBrand")
-        header_layout.addWidget(brand)
+        brand_box.addWidget(brand)
+        brand_hint = QLabel(tr("KONSOLA GIER"))
+        brand_hint.setObjectName("ConsoleKicker")
+        brand_box.addWidget(brand_hint)
+        header_layout.addLayout(brand_box)
         header_layout.addStretch(1)
+        self.clock = QLabel("")
+        self.clock.setObjectName("ConsoleClock")
+        header_layout.addWidget(self.clock)
         self.pad_status = QLabel(tr("PAD: szukam..."))
-        self.pad_status.setObjectName("ConsoleMuted")
+        self.pad_status.setObjectName("ConsolePad")
         header_layout.addWidget(self.pad_status)
         close = QPushButton(tr("WYJDŹ  [B]"))
         close.setObjectName("ConsoleGhost")
         close.clicked.connect(self.close_console)
         header_layout.addWidget(close)
         layout.addWidget(header)
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(1000)
+        self._clock_timer.timeout.connect(self._update_clock)
+        self._update_clock()
 
         body = QHBoxLayout()
         body.setSpacing(20)
@@ -183,25 +332,33 @@ class ConsoleWindow(QMainWindow):
         self.tiles.setViewMode(QListView.ViewMode.IconMode)
         self.tiles.setResizeMode(QListView.ResizeMode.Adjust)
         self.tiles.setMovement(QListView.Movement.Static)
-        self.tiles.setSpacing(12)
+        self.tiles.setSpacing(14)
         self.tiles.setIconSize(self._cover_size)
-        self.tiles.setGridSize(QSize(250, 370))
+        self.tiles.setGridSize(QSize(258, 384))
         self.tiles.setUniformItemSizes(True)
         self.tiles.setWordWrap(True)
         self.tiles.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tiles.setMouseTracking(True)
+        self.tiles.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.tiles.viewport().setMouseTracking(True)
+        self.tiles.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.tiles.setItemDelegate(ConsoleGameDelegate(self.tiles))
         self.tiles.currentRowChanged.connect(lambda _row: self._update_details())
         self.tiles.itemDoubleClicked.connect(self._launch_item)
         body.addWidget(self.tiles, 1)
 
         details = QFrame()
         details.setObjectName("ConsoleDetails")
-        details.setFixedWidth(350)
+        details.setFixedWidth(380)
         details_layout = QVBoxLayout(details)
-        details_layout.setContentsMargins(20, 20, 20, 20)
-        details_layout.setSpacing(10)
+        details_layout.setContentsMargins(22, 20, 22, 20)
+        details_layout.setSpacing(9)
+        self.detail_kicker = QLabel(tr("WYBRANA GRA"))
+        self.detail_kicker.setObjectName("ConsoleKicker")
+        details_layout.addWidget(self.detail_kicker)
         self.cover = QLabel()
         self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cover.setFixedSize(250, 330)
+        self.cover.setFixedSize(270, 350)
         self.cover.setObjectName("ConsoleCover")
         details_layout.addWidget(self.cover, 0, Qt.AlignmentFlag.AlignHCenter)
         self.title = QLabel(tr("Wybierz grę"))
@@ -212,6 +369,28 @@ class ConsoleWindow(QMainWindow):
         self.meta.setObjectName("ConsoleMuted")
         self.meta.setWordWrap(True)
         details_layout.addWidget(self.meta)
+        self.chips_frame = QFrame()
+        self.chips_frame.setObjectName("ConsoleChips")
+        chips = QGridLayout(self.chips_frame)
+        chips.setContentsMargins(0, 4, 0, 0)
+        chips.setHorizontalSpacing(6)
+        chips.setVerticalSpacing(6)
+        self.source_chip = QLabel("")
+        self.scaling_chip = QLabel("")
+        self.fps_chip = QLabel("")
+        self.runner_chip = QLabel("")
+        for chip in (
+            self.source_chip,
+            self.scaling_chip,
+            self.fps_chip,
+            self.runner_chip,
+        ):
+            chip.setObjectName("ConsoleChip")
+        chips.addWidget(self.source_chip, 0, 0)
+        chips.addWidget(self.fps_chip, 0, 1)
+        chips.addWidget(self.scaling_chip, 1, 0)
+        chips.addWidget(self.runner_chip, 1, 1)
+        details_layout.addWidget(self.chips_frame)
         details_layout.addStretch(1)
         self.play = QPushButton(tr("▶  GRAJ  [A]"))
         self.play.setObjectName("ConsolePrimary")
@@ -221,15 +400,32 @@ class ConsoleWindow(QMainWindow):
         edit.setObjectName("ConsoleGhost")
         edit.clicked.connect(self._edit_current)
         details_layout.addWidget(edit)
+        self._details_effect = QGraphicsOpacityEffect(details)
+        details.setGraphicsEffect(self._details_effect)
         body.addWidget(details)
         layout.addLayout(body, 1)
 
-        footer = QLabel(
-            tr("D-PAD / LEWA GAŁKA — wybór     A — graj     B — wyjdź     "
-            "X — edytuj     Y — odśwież     START — wyjdź")
-        )
-        footer.setObjectName("ConsoleFooter")
-        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer = QFrame()
+        footer.setObjectName("ConsoleFooterBar")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 6, 16, 6)
+        footer_layout.setSpacing(8)
+        footer_layout.addStretch(1)
+        for key, label in (
+            ("A", tr("Graj")),
+            ("B", tr("Wyjdź")),
+            ("X", tr("Edytuj")),
+            ("Y", tr("Odśwież")),
+            ("START", tr("Wyjdź")),
+        ):
+            key_label = QLabel(key)
+            key_label.setObjectName("ConsoleKey")
+            footer_layout.addWidget(key_label)
+            text_label = QLabel(label)
+            text_label.setObjectName("ConsoleKeyLabel")
+            footer_layout.addWidget(text_label)
+            footer_layout.addSpacing(14)
+        footer_layout.addStretch(1)
         layout.addWidget(footer)
 
         self.gamepad = GamepadManager(self)
@@ -256,8 +452,12 @@ class ConsoleWindow(QMainWindow):
         for game in self._games:
             item = QListWidgetItem(self._icon_for(game), str(game.get("name", "?")))
             item.setData(Qt.ItemDataRole.UserRole, int(game["id"]))
+            item.setData(
+                SOURCE_ROLE,
+                "STEAM" if game.get("is_steam") else "STANDALONE",
+            )
             item.setToolTip(str(game.get("name", "")))
-            item.setSizeHint(QSize(246, 366))
+            item.setSizeHint(QSize(254, 380))
             self.tiles.addItem(item)
         if self._games:
             index = 0
@@ -266,11 +466,39 @@ class ConsoleWindow(QMainWindow):
                     index = i
                     break
             self.tiles.setCurrentRow(index)
+            self._update_details()
         else:
             self.title.setText(tr("Biblioteka jest pusta"))
             self.meta.setText(tr("Dodaj grę w normalnym widoku Boostlayera."))
             self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+            self.chips_frame.setVisible(False)
+            self.detail_kicker.setText(tr("BIBLIOTEKA"))
+            self._set_backdrop(None)
         self.setFocus()
+
+    def _set_backdrop(self, pixmap: QPixmap | None) -> None:
+        self._backdrop_source = pixmap
+        self._refresh_backdrop()
+
+    def _refresh_backdrop(self) -> None:
+        if not hasattr(self, "backdrop"):
+            return
+        size = self.backdrop.size()
+        if size.width() <= 0 or size.height() <= 0:
+            return
+        if self._backdrop_source is None or self._backdrop_source.isNull():
+            self.backdrop.clear()
+            return
+        scaled = self._backdrop_source.scaled(
+            size,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.backdrop.setPixmap(scaled)
+
+    def _update_clock(self) -> None:
+        if hasattr(self, "clock"):
+            self.clock.setText(time.strftime("%H:%M"))
 
     def _current_game(self) -> dict[str, Any] | None:
         item = self.tiles.currentItem()
@@ -292,26 +520,51 @@ class ConsoleWindow(QMainWindow):
             from core import exe_bits
 
             bits = exe_bits(str(game.get("exe_path", "")))
-        source = (
-            f"STEAM  {game.get('steam_appid', '')}"
-            if game.get("is_steam")
-            else "STANDALONE"
-        )
+        source = "STEAM" if game.get("is_steam") else tr("STANDALONE")
         if bits:
-            source += f"  //  {bits}-BIT"
+            source += f"  ·  {bits}-BIT"
         runner = Path(str(game.get("runner_path", ""))).name or "AUTO"
-        self.meta.setText(
-            f"{source}\n"
-            f"{tr('Skalowanie: {label}', label=scaling_label(str(game.get('scaling_mode', 'native'))))}\n"
-            f"FPS: {int(game.get('fps_limit', 0)) or '∞'}\n"
-            f"Runner: {runner}"
+        fps = int(game.get("fps_limit", 0)) or 0
+        self.meta.setText(tr("Naciśnij A, aby uruchomić, lub X, aby edytować."))
+        self.detail_kicker.setText(tr("WYBRANA GRA"))
+        self.source_chip.setText(source)
+        self.scaling_chip.setText(
+            scaling_label(str(game.get("scaling_mode", "native")))
         )
+        self.fps_chip.setText(
+            tr("{fps} FPS", fps=fps) if fps else tr("Bez limitu")
+        )
+        self.runner_chip.setText(tr("Runner: {name}", name=runner[:20]))
+        self.runner_chip.setToolTip(runner)
+        self.chips_frame.setVisible(True)
         cover = Path(str(game.get("cover_path", "") or "")).expanduser()
+        pixmap: QPixmap | None = None
         if cover.is_file():
-            pixmap = QIcon(str(cover)).pixmap(QSize(250, 330))
-            self.cover.setPixmap(pixmap)
-        else:
-            self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+            icon = QIcon(str(cover))
+            if not icon.isNull():
+                pixmap = icon.pixmap(QSize(270, 350))
+        if pixmap is None or pixmap.isNull():
+            pixmap = app_icon(180).pixmap(180, 180)
+        self.cover.setPixmap(
+            pixmap.scaled(
+                self.cover.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self._set_backdrop(pixmap)
+        effect = getattr(self, "_details_effect", None)
+        if effect is not None:
+            if self._details_animation is not None:
+                self._details_animation.stop()
+            effect.setOpacity(0.55)
+            animation = QPropertyAnimation(effect, b"opacity", self)
+            animation.setDuration(190)
+            animation.setStartValue(0.55)
+            animation.setEndValue(1.0)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            animation.start()
+            self._details_animation = animation
 
     def _move(self, dx: int, dy: int) -> None:
         count = self.tiles.count()
@@ -403,13 +656,24 @@ class ConsoleWindow(QMainWindow):
         self.hide()
         self.closed.emit()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "backdrop"):
+            self.backdrop.setGeometry(0, 0, self.width(), self.height())
+            self.shade.setGeometry(0, 0, self.width(), self.height())
+            self._refresh_backdrop()
+
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        self._update_clock()
+        self._clock_timer.start()
+        self._refresh_backdrop()
         self.gamepad.start()
         self.reload()
         self.setFocus()
 
     def hideEvent(self, event) -> None:  # noqa: N802
+        self._clock_timer.stop()
         self.gamepad.stop()
         super().hideEvent(event)
 

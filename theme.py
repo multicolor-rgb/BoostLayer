@@ -166,12 +166,23 @@ QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
     background: {theme.accent_dim};
 }}
 QWidget#ConsoleRoot {{
-    background: {theme.background};
+    background: transparent;
+}}
+QLabel#ConsoleBackdrop {{
+    background: transparent;
+}}
+QFrame#ConsoleShade {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(4, 8, 11, 130),
+        stop:0.48 rgba(7, 11, 14, 205),
+        stop:1 {theme.background});
 }}
 QFrame#ConsoleHeader {{
-    background: {theme.background_dark};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {theme.background_dark},
+        stop:1 {theme.panel});
     border: 1px solid {theme.border};
-    border-radius: 8px;
+    border-radius: 10px;
 }}
 QLabel#ConsoleBrand {{
     color: {theme.accent};
@@ -180,19 +191,48 @@ QLabel#ConsoleBrand {{
     font-weight: 800;
     letter-spacing: 3px;
 }}
-QLabel#ConsoleMuted, QLabel#ConsoleFooter {{
+QLabel#ConsoleKicker {{
     color: {theme.muted};
     font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+    letter-spacing: 2px;
+}}
+QLabel#ConsoleClock {{
+    color: {theme.accent};
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 13pt;
+    font-weight: 700;
+    padding: 0 12px;
+}}
+QLabel#ConsolePad {{
+    color: {theme.muted};
+    background: {theme.background_dark};
+    border: 1px solid {theme.border};
+    border-radius: 10px;
+    padding: 5px 10px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+}}
+QLabel#ConsolePad[available="true"] {{
+    color: {theme.success};
+    border-color: {theme.success};
+}}
+QLabel#ConsoleMuted {{
+    color: {theme.muted};
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
 }}
 QLabel#ConsoleTitle {{
     color: {theme.text};
-    font-size: 19pt;
+    font-size: 23pt;
     font-weight: 800;
+    letter-spacing: 1px;
 }}
 QLabel#ConsoleCover {{
     background: {theme.panel};
     border: 1px solid {theme.border};
-    border-radius: 8px;
+    border-radius: 12px;
+    padding: 8px;
 }}
 QListWidget#ConsoleTiles {{
     background: transparent;
@@ -201,30 +241,61 @@ QListWidget#ConsoleTiles {{
     padding: 4px;
 }}
 QListWidget#ConsoleTiles::item {{
-    color: {theme.text};
-    background: {theme.panel};
-    border: 1px solid {theme.border};
-    border-radius: 9px;
-    padding: 7px;
-    margin: 4px;
-}}
-QListWidget#ConsoleTiles::item:selected {{
-    color: {theme.text};
-    background: {theme.panel_alt};
-    border: 2px solid {theme.accent};
+    background: transparent;
+    border: 0;
+    padding: 0;
+    margin: 0;
 }}
 QFrame#ConsoleDetails {{
-    background: {theme.panel};
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 {theme.panel_alt},
+        stop:1 {theme.panel});
     border: 1px solid {theme.border};
-    border-radius: 10px;
+    border-radius: 12px;
+}}
+QFrame#ConsoleChips {{
+    background: transparent;
+    border: 0;
+}}
+QLabel#ConsoleChip {{
+    color: {theme.text};
+    background: {theme.background_dark};
+    border: 1px solid {theme.border};
+    border-radius: 7px;
+    padding: 5px 8px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+}}
+QFrame#ConsoleFooterBar {{
+    background: {theme.background_dark};
+    border: 1px solid {theme.border};
+    border-radius: 9px;
+}}
+QLabel#ConsoleKey {{
+    color: {theme.background_dark};
+    background: {theme.accent};
+    border-radius: 5px;
+    padding: 3px 7px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+    font-weight: 800;
+}}
+QLabel#ConsoleKeyLabel {{
+    color: {theme.muted};
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
 }}
 QPushButton#ConsolePrimary {{
-    background: {theme.accent};
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {theme.accent},
+        stop:1 {theme.accent_soft});
     color: {theme.background_dark};
     border: 1px solid {theme.accent};
-    border-radius: 7px;
-    padding: 12px;
+    border-radius: 8px;
+    padding: 14px;
+    font-size: 11pt;
     font-weight: 800;
+    letter-spacing: 1px;
 }}
 QPushButton#ConsolePrimary:hover {{
     background: {theme.accent_soft};
@@ -234,7 +305,7 @@ QPushButton#ConsoleGhost {{
     color: {theme.muted};
     border: 1px solid {theme.border};
     border-radius: 7px;
-    padding: 8px 12px;
+    padding: 9px 12px;
 }}
 QPushButton#ConsoleGhost:hover {{
     color: {theme.text};

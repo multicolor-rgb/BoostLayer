@@ -17,7 +17,9 @@ runtime jest **PyQt6**.
 - **Ikona** — monogram BL z błyskawicą, dynamiczny akcent w trayu oraz
   pełny zestaw PNG/SVG w AppImage i `.deb`.
 - **Tryb konsolowy** — pełnoekranowy Big Picture z dużymi okładkami,
-  wyborem monitora i obsługą pada (`/dev/input/js*`).
+  dynamicznym tłem z okładki, kinową poświatą motywu i obsługą pada
+  (`/dev/input/js*`). Po zakończeniu gry standalone wraca automatycznie do
+  konsoli; dla gier Steam działa wykrywanie best-effort.
 - **Tray i hotkey** — stylowane menu z ostatnimi grami; `Ctrl+Alt+S`
   pokazuje/ukrywa okno (X11 przez `XGrabKey`, na Wayland lokalny fallback).
 - **Minimalizacja** — po starcie gry Boostlayer minimalizuje się do paska
@@ -39,6 +41,10 @@ runtime jest **PyQt6**.
   przy każdym starcie i zawsze zawiera `custom_text=<krótki profil>`
   (np. `FSR720p`, `CRT`, `PFSR-Q`). Wymuszone jest `legacy_layout=0`, bo stary
   renderer MangoHud nie wyświetla `custom_text`.
+- **Winetricks** — instalacja komponentów Windows per gra: PhysX, Visual C++,
+  DirectX 9, XACT, .NET, Media Foundation i własne verb-y. Działa dla Wine/Proton
+  oraz — przez `protontricks` — dla gier Steam. Można włączyć automatyczną
+  instalację wybranych komponentów przed startem gry.
 - **Steam** — import `appmanifest_*.acf`, okładki z lokalnego `librarycache`,
   potem CDN. Gry Steam uruchamiane są przez klienta Steam; wrapper
   `~/.config/boostlayer/steam-wrapper.sh` jest automatycznie dopisywany do
@@ -69,6 +75,9 @@ runtime jest **PyQt6**.
 - Na Intel GPU statystyki GPU w MangoHud wymagają `intel-gpu-tools`
   (`intel_gpu_top`); bez tego MangoHud wyłącza `gpu_stats`.
 - Wine trzeba zainstalować osobno (duży pakiet, świadoma decyzja użytkownika).
+- Winetricks jest opcjonalny. Można użyć systemowego `winetricks` albo
+  zainstalować lokalną kopię z Ustawień → Zależności. Dla gier Steam potrzebny
+  jest `protontricks`. Winetricks może wymagać `cabextract` i `unzip`.
 - Do budowy: `PyInstaller`, `dpkg-deb`, `appimagetool` (pobierany przez
   `build.sh`, jeśli go brak).
 
@@ -100,7 +109,11 @@ python main.py
    przywraca lub chowa okno.
 4. **Tryb konsolowy** otworzysz z menu aplikacji, tray lub przez `--console`.
    Pad jest aktywny tylko w tym widoku i jest wyłączany po starcie gry.
-4. Dla gry Steam Boostlayer przy pierwszym uruchomieniu zapyta o zamknięcie
+5. Komponenty Windows instalujesz przez menu kontekstowe gry → **Winetricks…**
+   (PhysX, VC++, DirectX 9, XACT, .NET itd.). Dla gier Steam używany jest
+   `protontricks`. Opcję automatycznej instalacji przed startem włączasz w
+   edycji gry.
+6. Dla gry Steam Boostlayer przy pierwszym uruchomieniu zapyta o zamknięcie
    Steama, dopisze wrapper do `LaunchOptions`, zrobi backup `localconfig.vdf`
    i uruchomi grę ponownie przez `steam -applaunch`. Możesz też użyć
    **Ustawienia → Steam wrapper → Zastosuj do wszystkich gier Steam**.
