@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # =============================================================================
 #  BoostLayer — git / GitHub automation (SSH).
 #
@@ -7,7 +7,7 @@
 #  * If the repository already exists and has uncommitted changes: create a
 #    date-stamped branch (update-YYYYMMDD-HHMMSS), commit and push it over SSH.
 # =============================================================================
-set -euo pipefail
+set -eu
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_OWNER="multicolor-rgb"

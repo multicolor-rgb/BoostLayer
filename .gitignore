@@ -21,7 +21,10 @@ dist/
 *.zip
 
 # --- Downloaded tools ---
-tools/
+tools/*
+!tools/install-mangohud32.sh
+!tools/install-gamepad-udev.sh
+!tools/render_icons.py
 
 # --- Editor / OS ---
 .vscode/

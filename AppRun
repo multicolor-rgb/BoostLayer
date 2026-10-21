@@ -1,7 +1,10 @@
 #!/bin/sh
-# BoostLayer AppImage entry point.
-# Resolves the AppDir even when launched through a symlink.
-HERE="$(dirname "$(readlink -f "$0")")"
-export PATH="$HERE/usr/bin:$PATH"
-export LD_LIBRARY_PATH="$HERE/usr/lib:$LD_LIBRARY_PATH"
-exec "$HERE/usr/bin/boostlayer" "$@"
+# Development/AppDir entry point. build.sh generates the final AppRun too.
+set -eu
+APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export APPDIR
+export PATH="$APPDIR/usr/bin:$PATH"
+if [ -x "$APPDIR/usr/bin/boostlayer/boostlayer" ]; then
+    exec "$APPDIR/usr/bin/boostlayer/boostlayer" "$@"
+fi
+exec "$APPDIR/usr/bin/boostlayer" "$@"

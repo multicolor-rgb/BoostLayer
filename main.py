@@ -1,3775 +1,5054 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-BoostLayer — ultra-lean native Linux clone of "Lossless Scaling" with built-in OSD.
+"""Boostlayer UI - PyQt6 presentation layer for the Wine/Proton launcher."""
+from __future__ import annotations
 
-Real-time window/screen upscaling (AMD FSR 1.0 EASU+RCAS, Integer, Nearest, Bicubic),
-in-shader frame generation, a performance OSD and a global hotkey.  Runs on Mesa
-(AMD Radeon / Intel iris) and NVIDIA under both X11 and Wayland.
-
-FSR 1.0 EASU/RCAS shader logic is a GLSL port of AMD FidelityFX Super Resolution 1.0
-(c) 2021 Advanced Micro Devices, Inc. — MIT License.
-
-Copyright (c) 2026 multicolor-rgb.  MIT License.
-"""
-
-import os
-import sys
-import gc
-import time
 import ctypes
-import struct
-import zlib
+import html
+import json
+import os
+import re
+import shlex
 import shutil
-import subprocess
-import threading
+import sys
+import time
+import uuid
+from functools import partial
+from pathlib import Path
+from typing import Any
 
-import numpy as np
+from PyQt6.QtCore import (
+    QByteArray,
+    QCoreApplication,
+    QEvent,
+    QLibraryInfo,
+    QObject,
+    QPoint,
+    QPointF,
+    QProcess,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QTranslator,
+    QUrl,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QDesktopServices,
+    QGuiApplication,
+    QFont,
+    QFontDatabase,
+    QIcon,
+    QKeySequence,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+    QShortcut,
+)
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLayout,
+    QLayoutItem,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QProgressDialog,
+    QPushButton,
+    QScrollArea,
+    QSizeGrip,
+    QSizePolicy,
+    QSpinBox,
+    QStackedWidget,
+    QSystemTrayIcon,
+    QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+)
 
-# ---------------------------------------------------------------------------
-# Optional dependencies (graceful fallbacks).  The application reports exactly
-# which backend is missing instead of crashing with an obscure ImportError.
-# ---------------------------------------------------------------------------
-try:
-    import psutil
-except ImportError:  # pragma: no cover
-    psutil = None
+import db
+from db import (
+    FPS_LIMITS,
+    SCALING_PROFILES,
+    Database,
+    config_dir,
+    mangohud_config,
+    scaling_label,
+)
+from theme import DEFAULT_THEME, THEMES, build_qss, get_theme, set_theme
+from i18n import DEFAULT_LANGUAGE, LANGUAGES, get_language, set_language, tr
+from console import ConsoleWindow
+from core import (
+    APP_NAME,
+    APP_VERSION,
+    LAST_RUN_LOG,
+    USER_AGENT,
+    DependencyGroup,
+    RunnerDownloadWorker,
+    RunnerInfo,
+    RunnerReleasesWorker,
+    SteamOptionsWorker,
+    SteamSyncWorker,
+    app_icon,
+    choose_runner_asset,
+    dependency_install_groups,
+    detect_steam_root,
+    discover_runners,
+    ensure_crt_shader,
+    exe_bits,
+    ensure_launcher,
+    ensure_steam_wrapper,
+    find_proton_script,
+    gamemode32_installed,
+    gamepad_udev_script,
+    human_bytes,
+    latest_steam_backup,
+    log,
+    mangohud32_path,
+    mangohud32_script,
+    mangohud_library_path,
+    missing_installable_tools,
+    package_manager,
+    parse_env_vars,
+    resolve_runner,
+    steam_account,
+    steam_client_command,
+    steam_is_running,
+    steam_launch_action_for_appid,
+    steam_launch_option,
+    steam_wrapper_path,
+    tool_status,
+)
 
-try:
-    import glfw
-    from OpenGL import GL as gl
-    HAS_GL = True
-except ImportError:  # pragma: no cover
-    HAS_GL = False
-
-try:
-    import mss
-    HAS_MSS = True
-except ImportError:  # pragma: no cover
-    HAS_MSS = False
-
-try:
-    from pynput import keyboard as _pynput_keyboard
-    HAS_PYNPUT = True
-except ImportError:  # pragma: no cover
-    HAS_PYNPUT = False
-
-try:
-    import evdev
-    HAS_EVDEV = True
-except ImportError:  # pragma: no cover
-    HAS_EVDEV = False
-
-try:
-    import customtkinter as ctk
-    HAS_CTK = True
-except ImportError:  # pragma: no cover
-    HAS_CTK = False
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-APP_NAME = "BoostLayer"
-APP_VERSION = "1.0.1"
-DEFAULT_HOTKEY = "<ctrl>+<alt>+s"
-
-# Persistent log (especially useful for the packaged GUI build, where stdout is
-# not attached to a terminal).
-APP_LOG = os.path.join(
-    os.environ.get(
-        "XDG_STATE_HOME",
-        os.path.join(os.path.expanduser("~"), ".local", "state")),
-    "boostlayer", "boostlayer.log")
-
-
-def _log(msg):
-    """Append a timestamped line to the application log (best effort)."""
-    try:
-        os.makedirs(os.path.dirname(APP_LOG), exist_ok=True)
-        with open(APP_LOG, "a", encoding="utf-8") as fh:
-            fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
-    except Exception:
-        pass
-
-
-def _acquire_single_instance():
-    """Take an exclusive lock so only one BoostLayer instance can run.
-
-    Returns an open file object on success, ``False`` when another instance
-    holds the lock, or ``None`` when locking is not available.  The lock is
-    released by the kernel when the process exits (even after a crash)."""
-    try:
-        import fcntl
-    except ImportError:
-        return None
-    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    path = os.path.join(base, "boostlayer-%d.lock" % os.getuid())
-    try:
-        fh = open(path, "w")
-    except Exception:
-        return None
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return False
-    try:
-        fh.write(str(os.getpid()))
-        fh.flush()
-    except Exception:
-        pass
-    return fh
-
-
-
-# Scaling-mode identifiers are stable ASCII keys; display names are localised.
-SCALE_MODE_KEYS = ["fsr", "integer", "nearest", "bicubic"]
-SCALE_MODE_IDS = {k: i for i, k in enumerate(SCALE_MODE_KEYS)}
-SCALE_MODE_NAMES = {i: k for i, k in enumerate(SCALE_MODE_KEYS)}
-
-# ---------------------------------------------------------------------------
-# Localisation (English / German / Polish).
-# GUI strings may use full Unicode; `osd_*` strings must stay ASCII-only
-# because the embedded 5x7 OSD font only covers ASCII.
-# ---------------------------------------------------------------------------
-LANGUAGES = {
-    "en": "English",
-    "de": "Deutsch",
-    "pl": "Polski",
+QSS = """
+QWidget {
+    color: #DCEBF1;
+    background: transparent;
+    font-family: "DejaVu Sans", "Noto Sans", sans-serif;
+    font-size: 10pt;
+    outline: none;
 }
-
-TRANSLATIONS = {
-    "en": {
-        "tab_scaling": "Scaling & FG",
-        "tab_osd": "Performance OSD",
-        "language": "Language",
-        "scaling_type": "Scaling type",
-        "sharpness": "Sharpness",
-        "aspect_ratio": "Aspect ratio",
-        "auto": "Auto",
-        "custom": "Custom",
-        "custom_multiplier": "Custom multiplier",
-        "frame_generation": "Frame generation (shader)",
-        "capture_delay_ms": "Capture delay (ms)",
-        "capture_target": "Capture target",
-        "capture_monitor": "Capture monitor",
-        "output_monitor": "Output monitor",
-        "fullscreen": "Fullscreen",
-        "active_window": "Active Window",
-        "window": "Window",
-        "target_window": "Target window",
-        "refresh": "Refresh",
-        "select_window": "Click window",
-        "capture_note": "Window captures the selected window, Active follows focus, Fullscreen grabs the topmost window on the selected monitor. BoostLayer never captures its own overlay (no mirror loop).",
-        "performance_osd": "Performance OSD",
-        "displayed_metrics": "Displayed metrics",
-        "metric_fps": "FPS (Capture & Render)",
-        "metric_cpu": "CPU usage",
-        "metric_gpu": "GPU usage",
-        "metric_ram": "RAM usage",
-        "gpu_note": "GPU telemetry: AMD (sysfs gpu_busy_percent), Intel (DRM freq / intel_gpu_top), NVIDIA (nvidia-smi).",
-        "start_scaling": "Start Scaling",
-        "stop_scaling": "Stop Scaling",
-        "quit": "Quit",
-        "status_listening": "Listening for hotkey...",
-        "status_scaling": "SCALING",
-        "status_idle": "IDLE",
-        "status_fmt": "Hotkey: %s — Listening | %s | %s | %s",
-        "mode_fsr": "FSR 1.0",
-        "mode_integer": "Integer Scaling",
-        "mode_nearest": "Nearest Neighbor",
-        "mode_bicubic": "Bicubic",
-        "osd_mode_fsr": "FSR 1.0",
-        "osd_mode_integer": "INTEGER SCALING",
-        "osd_mode_nearest": "NEAREST NEIGHBOR",
-        "osd_mode_bicubic": "BICUBIC",
-        "osd_fps": "FPS  CAPTURE:%5.1f   RENDER:%5.1f",
-        "osd_fg_sharp": "FG: %s   SHARPNESS: %d",
-        "osd_on": "ON",
-        "osd_off": "OFF",
-    },
-    "de": {
-        "tab_scaling": "Skalierung & FG",
-        "tab_osd": "Performance-OSD",
-        "language": "Sprache",
-        "scaling_type": "Skalierungstyp",
-        "sharpness": "Schärfe",
-        "aspect_ratio": "Seitenverhältnis",
-        "auto": "Auto",
-        "custom": "Benutzerdefiniert",
-        "custom_multiplier": "Benutzerdefinierter Multiplikator",
-        "frame_generation": "Frame-Generierung (Shader)",
-        "capture_delay_ms": "Aufnahmeverzögerung (ms)",
-        "capture_target": "Aufnahmeziel",
-        "capture_monitor": "Aufnahme-Monitor",
-        "output_monitor": "Ausgabe-Monitor",
-        "fullscreen": "Vollbild",
-        "active_window": "Aktives Fenster",
-        "window": "Fenster",
-        "target_window": "Zielfenster",
-        "refresh": "Aktualisieren",
-        "select_window": "Fenster klicken",
-        "capture_note": "Fenster erfasst das gewählte Fenster, Aktiv folgt dem Fokus, Vollbild nimmt das oberste Fenster am gewählten Monitor. BoostLayer erfasst nie sein eigenes Overlay (keine Spiegel-Schleife).",
-        "performance_osd": "Performance-OSD",
-        "displayed_metrics": "Angezeigte Metriken",
-        "metric_fps": "FPS (Aufnahme & Render)",
-        "metric_cpu": "CPU-Auslastung",
-        "metric_gpu": "GPU-Auslastung",
-        "metric_ram": "RAM-Auslastung",
-        "gpu_note": "GPU-Telemetrie: AMD (sysfs gpu_busy_percent), Intel (DRM-Frequenz / intel_gpu_top), NVIDIA (nvidia-smi).",
-        "start_scaling": "Skalierung starten",
-        "stop_scaling": "Skalierung stoppen",
-        "quit": "Beenden",
-        "status_listening": "Warte auf Hotkey...",
-        "status_scaling": "SKALIERUNG",
-        "status_idle": "LEERLAUF",
-        "status_fmt": "Hotkey: %s — lauscht | %s | %s | %s",
-        "mode_fsr": "FSR 1.0",
-        "mode_integer": "Ganzzahlige Skalierung",
-        "mode_nearest": "Nächster Nachbar",
-        "mode_bicubic": "Bikubisch",
-        "osd_mode_fsr": "FSR 1.0",
-        "osd_mode_integer": "INTEGER-SKALIERUNG",
-        "osd_mode_nearest": "NAECHSTER NACHBAR",
-        "osd_mode_bicubic": "BIKUBISCH",
-        "osd_fps": "FPS  AUFNAHME:%5.1f  RENDER:%5.1f",
-        "osd_fg_sharp": "FG: %s   SCHAERFE: %d",
-        "osd_on": "AN",
-        "osd_off": "AUS",
-    },
-    "pl": {
-        "tab_scaling": "Skalowanie i FG",
-        "tab_osd": "OSD wydajności",
-        "language": "Język",
-        "scaling_type": "Typ skalowania",
-        "sharpness": "Ostrość",
-        "aspect_ratio": "Proporcje obrazu",
-        "auto": "Auto",
-        "custom": "Niestandardowe",
-        "custom_multiplier": "Własny mnożnik",
-        "frame_generation": "Generowanie klatek (shader)",
-        "capture_delay_ms": "Opóźnienie przechwytywania (ms)",
-        "capture_target": "Cel przechwytywania",
-        "capture_monitor": "Monitor przechwytywania",
-        "output_monitor": "Monitor wyjścia",
-        "fullscreen": "Pełny ekran",
-        "active_window": "Aktywne okno",
-        "window": "Okno",
-        "target_window": "Okno docelowe",
-        "refresh": "Odśwież",
-        "select_window": "Kliknij okno",
-        "capture_note": "Okno przechwytuje wybrane okno, Aktywne podąża za fokusem, Pełny ekran bierze najwyższe okno na wybranym monitorze. BoostLayer nigdy nie przechwytuje własnego overlayu (brak pętli lustra).",
-        "performance_osd": "OSD wydajności",
-        "displayed_metrics": "Wyświetlane metryki",
-        "metric_fps": "FPS (Przechwyt i render)",
-        "metric_cpu": "Użycie CPU",
-        "metric_gpu": "Użycie GPU",
-        "metric_ram": "Użycie RAM",
-        "gpu_note": "Telemetria GPU: AMD (sysfs gpu_busy_percent), Intel (częstotliwość DRM / intel_gpu_top), NVIDIA (nvidia-smi).",
-        "start_scaling": "Start skalowania",
-        "stop_scaling": "Zatrzymaj skalowanie",
-        "quit": "Zamknij",
-        "status_listening": "Nasłuchiwanie skrótu...",
-        "status_scaling": "SKALOWANIE",
-        "status_idle": "BEZCZYNNOŚĆ",
-        "status_fmt": "Skrót: %s — nasłuchiwanie | %s | %s | %s",
-        "mode_fsr": "FSR 1.0",
-        "mode_integer": "Skalowanie całkowite",
-        "mode_nearest": "Najbliższy sąsiad",
-        "mode_bicubic": "Bikubiczne",
-        "osd_mode_fsr": "FSR 1.0",
-        "osd_mode_integer": "SKALOWANIE CALKOWITE",
-        "osd_mode_nearest": "NAJBLIZSZY SASIAD",
-        "osd_mode_bicubic": "BIKUBICZNE",
-        "osd_fps": "FPS  PRZECHWYT:%5.1f  RENDER:%5.1f",
-        "osd_fg_sharp": "FG: %s   OSTROSC: %d",
-        "osd_on": "ON",
-        "osd_off": "OFF",
-    },
+QWidget#Root {
+    background: #0E1013;
+    border: 1px solid #252B32;
 }
+QFrame#TitleBar {
+    background: #0A0C0E;
+    border-bottom: 1px solid #20262D;
+}
+QLabel#BrandMark {
+    color: #00E5FF;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 15pt;
+    font-weight: 800;
+    letter-spacing: 2px;
+}
+QLabel#BrandSub {
+    color: #5D707C;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+    letter-spacing: 2px;
+}
+QPushButton#WindowButton, QPushButton#CloseButton {
+    background: transparent;
+    border: 0;
+    color: #98AAB5;
+    font-size: 14pt;
+    min-width: 38px;
+    max-width: 38px;
+    min-height: 30px;
+    max-height: 30px;
+}
+QPushButton#WindowButton:hover {
+    background: #1D242B;
+    color: #FFFFFF;
+}
+QPushButton#CloseButton:hover {
+    background: #C4213E;
+    color: #FFFFFF;
+}
+QToolButton#TitleMenu {
+    background: transparent;
+    border: 0;
+    color: #8EA1AC;
+    font-size: 17pt;
+    min-width: 38px;
+    max-width: 38px;
+    min-height: 30px;
+}
+QToolButton#TitleMenu:hover {
+    background: #1D242B;
+    color: #00E5FF;
+}
+QFrame#Sidebar {
+    background: #101317;
+    border-right: 1px solid #20262D;
+}
+QPushButton#NavButton {
+    background: transparent;
+    border: 0;
+    border-left: 3px solid transparent;
+    color: #70828D;
+    text-align: left;
+    padding: 12px 14px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 9pt;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QPushButton#NavButton:hover {
+    color: #DDEFF5;
+    background: #151A1F;
+}
+QPushButton#NavButton:checked {
+    color: #00E5FF;
+    background: #101C21;
+    border-left: 3px solid #00E5FF;
+}
+QLabel#SidebarCaption {
+    color: #485861;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+    letter-spacing: 1px;
+}
+QLabel#SidebarLive {
+    color: #42F5A7;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+}
+QLabel#PageTitle {
+    color: #F2FBFF;
+    font-size: 22pt;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+QLabel#PageKicker {
+    color: #00E5FF;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 3px;
+}
+QLabel#PageSubtitle, QLabel#Muted {
+    color: #72838E;
+}
+QLabel#SectionTitle {
+    color: #E8F7FC;
+    font-size: 12pt;
+    font-weight: 700;
+}
+QLabel#StatsPill {
+    color: #9DB4C0;
+    background: #151B21;
+    border: 1px solid #263038;
+    border-radius: 11px;
+    padding: 4px 10px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+}
+QFrame#Panel {
+    background: #14191E;
+    border: 1px solid #252D35;
+    border-radius: 10px;
+}
+QFrame#Card {
+    background: #14191E;
+    border: 1px solid #252E36;
+    border-radius: 10px;
+}
+QFrame#Card:hover {
+    border: 1px solid #00B8CC;
+    background: #171E24;
+}
+QFrame#CompactRow {
+    background: #14191E;
+    border: 1px solid #232C34;
+    border-radius: 8px;
+}
+QFrame#CompactRow:hover {
+    border: 1px solid #00A6BA;
+}
+QLabel#CardTitle {
+    color: #EAF9FE;
+    font-size: 11pt;
+    font-weight: 700;
+}
+QLabel#CardMeta {
+    color: #71858F;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+}
+QLabel#Accent {
+    color: #00E5FF;
+}
+QLabel#Good {
+    color: #42F5A7;
+}
+QLabel#Warn {
+    color: #FFB347;
+}
+QLabel#Bad {
+    color: #FF4D6D;
+}
+QPushButton {
+    background: #192027;
+    color: #DDEBF1;
+    border: 1px solid #2A343D;
+    border-radius: 7px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background: #202A33;
+    border-color: #3A4853;
+}
+QPushButton:pressed {
+    background: #11171C;
+}
+QPushButton:disabled {
+    color: #4A5962;
+    background: #12171B;
+    border-color: #1E262C;
+}
+QPushButton#PrimaryButton {
+    background: #00C8E0;
+    color: #031014;
+    border: 1px solid #00E5FF;
+    font-weight: 800;
+}
+QPushButton#PrimaryButton:hover {
+    background: #54F0FF;
+}
+QPushButton#GhostButton {
+    background: transparent;
+    border: 1px solid #2C3942;
+    color: #9EB3BE;
+}
+QPushButton#GhostButton:hover {
+    border-color: #00C8E0;
+    color: #00E5FF;
+}
+QPushButton#DangerButton {
+    background: #251319;
+    color: #FF6C87;
+    border: 1px solid #54202F;
+}
+QPushButton#DangerButton:hover {
+    background: #3A1822;
+    border-color: #C4213E;
+}
+QPushButton#CardPlay {
+    background: #102A2F;
+    color: #00E5FF;
+    border: 1px solid #15515D;
+    border-radius: 6px;
+    padding: 6px 9px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+    font-weight: 800;
+}
+QPushButton#CardPlay:hover {
+    background: #00E5FF;
+    color: #041014;
+}
+QPushButton#CardIcon {
+    background: transparent;
+    border: 1px solid #2A343D;
+    border-radius: 6px;
+    color: #8FA3AE;
+    padding: 5px 8px;
+    font-size: 9pt;
+}
+QPushButton#CardIcon:hover {
+    color: #00E5FF;
+    border-color: #00A7BA;
+}
+QPushButton#DangerIcon:hover {
+    color: #FF4D6D;
+    border-color: #B92341;
+}
+QPushButton#ViewButton {
+    background: transparent;
+    color: #687B86;
+    border: 1px solid #242D35;
+    padding: 7px 11px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+}
+QPushButton#ViewButton:checked {
+    color: #00E5FF;
+    border-color: #008B9C;
+    background: #0D2025;
+}
+QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    background: #0D1216;
+    border: 1px solid #27323A;
+    border-radius: 6px;
+    padding: 7px 9px;
+    color: #E5F5FA;
+    selection-background-color: #007E90;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
+QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid #00B8CC;
+}
+QLineEdit#Search {
+    padding: 9px 12px;
+    background: #0B0F12;
+    border: 1px solid #232D35;
+}
+QComboBox::drop-down {
+    border: 0;
+    width: 26px;
+}
+QComboBox QAbstractItemView {
+    background: #12181D;
+    color: #DCEBF1;
+    border: 1px solid #2A3740;
+    selection-background-color: #005B68;
+    padding: 4px;
+}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    width: 18px;
+    background: #182027;
+    border: 0;
+}
+QCheckBox {
+    spacing: 9px;
+    color: #C7D9E1;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #34434D;
+    border-radius: 4px;
+    background: #0D1216;
+}
+QCheckBox::indicator:checked {
+    background: #00C8E0;
+    border: 1px solid #00E5FF;
+}
+QCheckBox::indicator:hover {
+    border-color: #00A7BA;
+}
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #26323A;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    width: 14px;
+    margin: -6px 0;
+    border-radius: 7px;
+    background: #00E5FF;
+}
+QSlider::sub-page:horizontal {
+    background: #00A6BA;
+    border-radius: 2px;
+}
+QProgressBar {
+    background: #0C1115;
+    border: 1px solid #25313A;
+    border-radius: 7px;
+    height: 14px;
+    text-align: center;
+    color: #C9EAF2;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+}
+QProgressBar::chunk {
+    background: #00B8CC;
+    border-radius: 6px;
+}
+QScrollArea {
+    background: transparent;
+    border: 0;
+}
+QScrollBar:vertical {
+    background: #0D1115;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #2A3740;
+    min-height: 30px;
+    border-radius: 4px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #00A7BA;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: #0D1115;
+}
+QAbstractScrollArea::corner {
+    background: #0D1115;
+    border: 0;
+}
+QScrollBar:horizontal {
+    background: #0D1115;
+    height: 10px;
+}
+QScrollBar::handle:horizontal {
+    background: #2A3740;
+    min-width: 30px;
+    border-radius: 4px;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+QTreeWidget {
+    background: #101519;
+    alternate-background-color: #12181D;
+    border: 1px solid #242D35;
+    border-radius: 8px;
+    color: #CFE1E8;
+    selection-background-color: #0B323A;
+    selection-color: #E9FCFF;
+    padding: 4px;
+}
+QTreeWidget::item {
+    padding: 6px;
+    border-bottom: 1px solid #1B2228;
+}
+QTreeWidget::item:hover {
+    background: #182128;
+}
+QHeaderView::section {
+    background: #0B0F12;
+    color: #6E818C;
+    border: 0;
+    border-bottom: 1px solid #29343C;
+    padding: 7px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+}
+QGroupBox {
+    border: 1px solid #252D35;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding: 16px 12px 12px 12px;
+    background: #12171B;
+    font-weight: 700;
+    color: #BBD3DC;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+    color: #00C8E0;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+    letter-spacing: 1px;
+}
+QMenu {
+    background: #11171C;
+    color: #D8EAF1;
+    border: 1px solid #2A3740;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 8px 28px 8px 14px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background: #0A3A42;
+    color: #FFFFFF;
+}
+QMenu::separator {
+    height: 1px;
+    background: #26313A;
+    margin: 6px 8px;
+}
+QToolTip {
+    background: #0B1013;
+    color: #DDF4FA;
+    border: 1px solid #00A7BA;
+    padding: 5px;
+}
+QDialog {
+    background: #0E1114;
+}
+QDialogButtonBox QPushButton {
+    min-width: 100px;
+}
+QFrame#StatusBar {
+    background: #0A0D10;
+    border-top: 1px solid #1F262D;
+}
+QLabel#StatusText {
+    color: #70838E;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 8pt;
+}
+QLabel#GhostBadge {
+    color: #42F5A7;
+    background: #0C2119;
+    border: 1px solid #1E4D3A;
+    border-radius: 9px;
+    padding: 3px 9px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 7pt;
+}
+QSizeGrip {
+    background: transparent;
+    width: 16px;
+    height: 16px;
+}
+"""
 
 
-def tr(lang, key):
-    """Return the localised string for `key` in language `lang`."""
-    table = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
-    return table.get(key, TRANSLATIONS["en"].get(key, key))
+TRAY_QSS = """
+QMenu#TrayMenu {
+    background: #101418;
+    color: #DCEBF1;
+    border: 1px solid #2A343D;
+    padding: 7px;
+}
+QMenu#TrayMenu::item {
+    padding: 8px 26px 8px 12px;
+    border-radius: 5px;
+}
+QMenu#TrayMenu::item:selected {
+    background: #17313A;
+    color: #FFFFFF;
+}
+QMenu#TrayMenu::item:disabled {
+    color: #7B8D98;
+}
+QMenu#TrayMenu::separator {
+    height: 1px;
+    background: #26323A;
+    margin: 6px 9px;
+}
+QMenu#TrayMenu::icon {
+    margin-left: 8px;
+}
+"""
 
 
-# ---------------------------------------------------------------------------
-# Environment / hardware detection
-# ---------------------------------------------------------------------------
-def detect_display_server():
-    """Return 'wayland', 'x11' or 'unknown'."""
-    if os.environ.get("WAYLAND_DISPLAY"):
-        return "wayland"
-    st = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
-    if st == "wayland":
-        return "wayland"
-    if os.environ.get("DISPLAY"):
-        return "x11"
-    return "unknown"
+class _XEvent(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("padding", ctypes.c_char * 188)]
 
 
-def detect_gpu_vendor():
-    """Detect the primary GPU vendor from sysfs. Returns 'nvidia'/'amd'/'intel'/'unknown'."""
-    vendors = []
-    base = "/sys/class/drm"
-    if os.path.isdir(base):
+class X11GlobalHotkey(QObject):
+    """Global Ctrl+Alt+S on X11 via libX11, without external packages.
+
+    Wayland does not expose XGrabKey; MainWindow falls back to a local
+    QShortcut and the tray informs the user.
+    """
+
+    activated = pyqtSignal()
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.available = False
+        self._display: int | None = None
+        self._lib: ctypes.CDLL | None = None
+        self._error_handler = None
+        self._last_activation = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self._poll)
+
+    def start(self) -> bool:
+        if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+            return False
+        if not os.environ.get("DISPLAY"):
+            return False
         try:
-            entries = os.listdir(base)
-        except OSError:
-            entries = []
-        for entry in entries:
-            if entry.startswith("card"):
-                vfile = os.path.join(base, entry, "device", "vendor")
-                if os.path.isfile(vfile):
-                    try:
-                        with open(vfile, "r") as f:
-                            vendors.append(f.read().strip())
-                    except OSError:
-                        pass
-    if any("0x10de" in v for v in vendors):
-        return "nvidia"
-    if any("0x1002" in v for v in vendors):
-        return "amd"
-    if any("0x8086" in v for v in vendors):
-        return "intel"
-    if shutil.which("nvidia-smi"):
-        return "nvidia"
-    return "unknown"
+            lib = ctypes.CDLL("libX11.so.6")
+            lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            lib.XOpenDisplay.restype = ctypes.c_void_p
+            lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            lib.XDefaultRootWindow.restype = ctypes.c_ulong
+            lib.XStringToKeysym.argtypes = [ctypes.c_char_p]
+            lib.XStringToKeysym.restype = ctypes.c_ulong
+            lib.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            lib.XKeysymToKeycode.restype = ctypes.c_uint
+            lib.XGrabKey.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_uint,
+                ctypes.c_ulong,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            lib.XGrabKey.restype = ctypes.c_int
+            lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XSync.restype = ctypes.c_int
+            lib.XPending.argtypes = [ctypes.c_void_p]
+            lib.XPending.restype = ctypes.c_int
+            lib.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            lib.XNextEvent.restype = ctypes.c_int
+            lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            lib.XCloseDisplay.restype = ctypes.c_int
+            display = lib.XOpenDisplay(None)
+            if not display:
+                return False
+            self._lib = lib
+            self._display = display
+            self._error_handler = ctypes.CFUNCTYPE(
+                ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p
+            )(lambda _display, _event: 0)
+            lib.XSetErrorHandler(self._error_handler)
+            root = lib.XDefaultRootWindow(display)
+            keysym = lib.XStringToKeysym(b"s")
+            keycode = lib.XKeysymToKeycode(display, keysym)
+            if not keycode:
+                self.stop()
+                return False
+            control = 1 << 2
+            mod1 = 1 << 3
+            lock = 1 << 1
+            numlock = 1 << 4
+            modifiers = [
+                control | mod1,
+                control | mod1 | lock,
+                control | mod1 | numlock,
+                control | mod1 | lock | numlock,
+            ]
+            for modifier in modifiers:
+                # owner_events=False, GrabModeAsync, GrabModeAsync
+                lib.XGrabKey(display, keycode, modifier, root, 0, 1, 1)
+            lib.XSync(display, 0)
+            self.available = True
+            self._timer.start()
+            return True
+        except (OSError, AttributeError, TypeError):
+            self.stop()
+            return False
 
-
-def _read_file(path):
-    try:
-        with open(path, "r") as f:
-            return f.read().strip()
-    except OSError:
-        return None
-
-
-def _list_drm():
-    base = "/sys/class/drm"
-    try:
-        return [e for e in os.listdir(base) if e.startswith("card")]
-    except OSError:
-        return []
-
-
-# ---------------------------------------------------------------------------
-# GPU telemetry
-# ---------------------------------------------------------------------------
-class GpuMonitor:
-    """Reads GPU usage for AMD (sysfs gpu_busy_percent), Intel (DRM frequency
-    ratio / intel_gpu_top) and NVIDIA (nvidia-smi).  All I/O is cached per call
-    and never blocks the render loop."""
-
-    def __init__(self):
-        self.vendor = detect_gpu_vendor()
-        self._amd_busy_path = self._find_amd_busy()
-        self._intel_freq = self._find_intel_freq()
-        self._name = self._detect_name()
-
-    # -- detection helpers -------------------------------------------------
-    def _find_amd_busy(self):
-        if self.vendor == "amd":
-            for card in _list_drm():
-                p = os.path.join("/sys/class/drm", card, "device", "gpu_busy_percent")
-                if os.path.isfile(p):
-                    return p
-        return None
-
-    def _find_intel_freq(self):
-        if self.vendor == "intel":
-            for card in _list_drm():
-                dev = os.path.join("/sys/class/drm", card, "device")
-                if os.path.isfile(os.path.join(dev, "gt_cur_freq_mhz")):
-                    return dev
-        return None
-
-    def _detect_name(self):
-        if self.vendor == "nvidia":
-            return "NVIDIA GPU"
-        if self.vendor == "amd":
-            return "AMD Radeon"
-        if self.vendor == "intel":
-            return "Intel iGPU"
-        return "Unknown GPU"
-
-    # -- readers -----------------------------------------------------------
-    def _read_amd(self):
-        v = _read_file(self._amd_busy_path)
-        if v is None:
-            return None
+    def _poll(self) -> None:
+        if self._display is None or self._lib is None:
+            return
         try:
-            return max(0.0, min(100.0, float(v)))
-        except ValueError:
-            return None
-
-    def _read_intel(self):
-        # Prefer the DRM frequency ratio; fall back to intel_gpu_top parsing.
-        if self._intel_freq:
-            cur = _read_file(os.path.join(self._intel_freq, "gt_cur_freq_mhz"))
-            mx = _read_file(os.path.join(self._intel_freq, "gt_max_freq_mhz"))
-            if mx is None:
-                mx = _read_file(os.path.join(self._intel_freq, "gt_RP0_freq_mhz"))
-            if cur and mx:
-                try:
-                    curf, mxf = float(cur), float(mx)
-                    if mxf > 0:
-                        return max(0.0, min(100.0, (curf / mxf) * 100.0))
-                except ValueError:
-                    pass
-        top = shutil.which("intel_gpu_top")
-        if top:
-            try:
-                out = subprocess.run(
-                    [top, "-J", "-s", "250"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    timeout=2, text=True,
-                ).stdout
-                # intel_gpu_top -J emits JSON; take the first "busy" value.
-                for token in out.split(","):
-                    if '"busy"' in token:
-                        val = "".join(ch for ch in token if ch.isdigit() or ch == ".")
-                        if val:
-                            return max(0.0, min(100.0, float(val)))
-            except (OSError, subprocess.TimeoutExpired, ValueError):
-                pass
-        return None
-
-    def _read_nvidia(self):
-        if not shutil.which("nvidia-smi"):
-            return None
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu",
-                 "--format=csv,noheader,nounits"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=2, text=True,
-            ).stdout
-            val = out.strip().splitlines()
-            if val:
-                return max(0.0, min(100.0, float(val[0].strip())))
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            return None
-        return None
-
-    def usage(self):
-        """Return GPU usage percentage (0-100) or None if unavailable."""
-        if self.vendor == "amd":
-            return self._read_amd()
-        if self.vendor == "intel":
-            return self._read_intel()
-        if self.vendor == "nvidia":
-            return self._read_nvidia()
-        return None
-
-    @property
-    def name(self):
-        return self._name
-
-
-# ---------------------------------------------------------------------------
-# Embedded 5x7 bitmap font (subset sufficient for the OSD).
-# Each glyph is 7 strings of 5 characters; '#' = lit pixel.
-# ---------------------------------------------------------------------------
-def _g(*rows):
-    return rows
-
-
-FONT_5X7 = {
-    " ": _g(".....", ".....", ".....", ".....", ".....", ".....", "....."),
-    "0": _g(".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."),
-    "1": _g("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
-    "2": _g(".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"),
-    "3": _g("#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."),
-    "4": _g("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
-    "5": _g("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
-    "6": _g("..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."),
-    "7": _g("#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."),
-    "8": _g(".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
-    "9": _g(".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."),
-    "A": _g(".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
-    "B": _g("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
-    "C": _g(".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."),
-    "D": _g("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
-    "E": _g("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
-    "F": _g("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
-    "G": _g(".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####"),
-    "H": _g("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
-    "I": _g(".###.", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."),
-    "J": _g("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
-    "K": _g("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
-    "L": _g("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
-    "M": _g("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
-    "N": _g("#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"),
-    "O": _g(".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
-    "P": _g("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
-    "Q": _g(".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".####"),
-    "R": _g("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
-    "S": _g(".####", "#....", "#....", ".###.", "....#", "....#", "####."),
-    "T": _g("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
-    "U": _g("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
-    "V": _g("#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
-    "W": _g("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
-    "X": _g("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
-    "Y": _g("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
-    "Z": _g("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
-    ":": _g(".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
-    ".": _g(".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
-    "%": _g("##..#", "##..#", "...#.", "..#..", ".#...", "#..##", "#..##"),
-    "/": _g("....#", "...#.", "...#.", "..#..", ".#...", ".#...", "#...."),
-    "-": _g(".....", ".....", ".....", "#####", ".....", ".....", "....."),
-    "+": _g(".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."),
-    "(": _g("...#.", "..#..", ".#...", ".#...", ".#...", "..#..", "...#."),
-    ")": _g(".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."),
-    "=": _g(".....", ".....", "#####", ".....", "#####", ".....", "....."),
-    ",": _g(".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."),
-    ">": _g(".....", "#....", ".#...", "..#..", ".#...", "#....", "....."),
-    "<": _g(".....", "...#.", "..#..", ".#...", "..#..", "...#.", "....."),
-    "[": _g(".###.", ".#...", ".#...", ".#...", ".#...", ".#...", ".###."),
-    "]": _g(".###.", "...#.", "...#.", "...#.", "...#.", "...#.", ".###."),
-    "_": _g(".....", ".....", ".....", ".....", ".....", ".....", "#####"),
-    "|": _g("..#..", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
-    "x": _g(".....", ".....", "#...#", ".#.#.", "..#..", ".#.#.", "#...#"),
-    "v": _g(".....", ".....", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
-}
-
-# ---------------------------------------------------------------------------
-# Shader sources (embedded as strings, per requirement).
-# ---------------------------------------------------------------------------
-
-# Fullscreen triangle vertex shader (no vertex buffer needed).
-VERT_SRC = """
-#version 400 core
-const vec2 VERTS[3] = vec2[3](
-    vec2(-1.0, -1.0),
-    vec2( 3.0, -1.0),
-    vec2(-1.0,  3.0)
-);
-out vec2 v_uv;
-void main() {
-    vec2 p = VERTS[gl_VertexID];
-    v_uv = p * 0.5 + 0.5;
-    gl_Position = vec4(p, 0.0, 1.0);
-}
-"""
-
-# Scaling shader: FSR 1.0 EASU / Integer / Nearest / Bicubic, selected by
-# u_mode.  Input sampled with textureGather/texture()/texelFetch so no new
-# texture is ever allocated in the hot path.
-SCALE_FRAG_SRC = """
-#version 400 core
-out vec4 fragColor;
-
-uniform sampler2D u_src;
-uniform vec2  u_srcSize;   // input texture size in texels
-uniform vec2  u_outSize;   // output target size in pixels
-uniform vec4  u_srcRect;   // source region (x, y, w, h) in input texel space
-uniform vec4  u_dstRect;   // dest region   (x, y, w, h) in output pixel space
-uniform int   u_mode;      // 0 FSR, 1 Integer, 2 Nearest, 3 Bicubic
-uniform vec4  u_con0;
-uniform vec4  u_con1;
-uniform vec4  u_con2;
-uniform vec4  u_con3;
-
-// ==========================================================================
-// FSR 1.0 EASU  (AMD FidelityFX Super Resolution 1.0, MIT)
-// ==========================================================================
-vec4 FsrEasuRF(vec2 p){ return textureGather(u_src, p, 0); }
-vec4 FsrEasuGF(vec2 p){ return textureGather(u_src, p, 1); }
-vec4 FsrEasuBF(vec2 p){ return textureGather(u_src, p, 2); }
-
-void FsrEasuTapF(inout vec3 aC, inout float aW, vec2 off, vec2 dir,
-                 vec2 len, float lob, float clp, vec3 c){
-    vec2 v;
-    v.x = (off.x * dir.x) + (off.y * dir.y);
-    v.y = (off.x * (-dir.y)) + (off.y * dir.x);
-    v *= len;
-    float d2 = v.x * v.x + v.y * v.y;
-    d2 = min(d2, clp);
-    float wB = (2.0 / 5.0) * d2 + (-1.0);
-    float wA = lob * d2 + (-1.0);
-    wB *= wB;
-    wA *= wA;
-    wB = (25.0 / 16.0) * wB + (-(25.0 / 16.0 - 1.0));
-    float w = wB * wA;
-    aC += c * w;
-    aW += w;
-}
-
-void FsrEasuSetF(inout vec2 dir, inout float len, vec2 pp,
-                 bool biS, bool biT, bool biU, bool biV,
-                 float lA, float lB, float lC, float lD, float lE){
-    float w = 0.0;
-    if(biS) w = (1.0 - pp.x) * (1.0 - pp.y);
-    if(biT) w = pp.x * (1.0 - pp.y);
-    if(biU) w = (1.0 - pp.x) * pp.y;
-    if(biV) w = pp.x * pp.y;
-    float dc = lD - lC;
-    float cb = lC - lB;
-    float lenX = max(abs(dc), abs(cb));
-    lenX = 1.0 / max(lenX, 1e-6);
-    float dirX = lD - lB;
-    dir.x += dirX * w;
-    lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
-    lenX *= lenX;
-    len += lenX * w;
-    float ec = lE - lC;
-    float ca = lC - lA;
-    float lenY = max(abs(ec), abs(ca));
-    lenY = 1.0 / max(lenY, 1e-6);
-    float dirY = lE - lA;
-    dir.y += dirY * w;
-    lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
-    lenY *= lenY;
-    len += lenY * w;
-}
-
-vec3 FsrEasuF(vec2 ip){
-    vec2 pp = ip * u_con0.xy + u_con0.zw;
-    vec2 fp = floor(pp);
-    pp -= fp;
-
-    vec2 p0 = fp * u_con1.xy + u_con1.zw;
-    vec2 p1 = p0 + u_con2.xy;
-    vec2 p2 = p0 + u_con2.zw;
-    vec2 p3 = p0 + u_con3.xy;
-
-    vec4 bczzR = FsrEasuRF(p0);
-    vec4 bczzG = FsrEasuGF(p0);
-    vec4 bczzB = FsrEasuBF(p0);
-    vec4 ijfeR = FsrEasuRF(p1);
-    vec4 ijfeG = FsrEasuGF(p1);
-    vec4 ijfeB = FsrEasuBF(p1);
-    vec4 klhgR = FsrEasuRF(p2);
-    vec4 klhgG = FsrEasuGF(p2);
-    vec4 klhgB = FsrEasuBF(p2);
-    vec4 zzonR = FsrEasuRF(p3);
-    vec4 zzonG = FsrEasuGF(p3);
-    vec4 zzonB = FsrEasuBF(p3);
-
-    vec4 bczzL = bczzB * 0.5 + (bczzR * 0.5 + bczzG);
-    vec4 ijfeL = ijfeB * 0.5 + (ijfeR * 0.5 + ijfeG);
-    vec4 klhgL = klhgB * 0.5 + (klhgR * 0.5 + klhgG);
-    vec4 zzonL = zzonB * 0.5 + (zzonR * 0.5 + zzonG);
-
-    float bL = bczzL.x;
-    float cL = bczzL.y;
-    float iL = ijfeL.x;
-    float jL = ijfeL.y;
-    float fL = ijfeL.z;
-    float eL = ijfeL.w;
-    float kL = klhgL.x;
-    float lL = klhgL.y;
-    float hL = klhgL.z;
-    float gL = klhgL.w;
-    float oL = zzonL.z;
-    float nL = zzonL.w;
-
-    vec2 dir = vec2(0.0);
-    float len = 0.0;
-    FsrEasuSetF(dir, len, pp, true,  false, false, false, bL, eL, fL, gL, jL);
-    FsrEasuSetF(dir, len, pp, false, true,  false, false, cL, fL, gL, hL, kL);
-    FsrEasuSetF(dir, len, pp, false, false, true,  false, fL, iL, jL, kL, nL);
-    FsrEasuSetF(dir, len, pp, false, false, false, true,  gL, jL, kL, lL, oL);
-
-    vec2 dir2 = dir * dir;
-    float dirR = dir2.x + dir2.y;
-    bool zro = dirR < (1.0 / 32768.0);
-    dirR = inversesqrt(max(dirR, 1e-12));
-    dirR = zro ? 1.0 : dirR;
-    dir.x = zro ? 1.0 : dir.x;
-    dir *= vec2(dirR);
-    len = len * 0.5;
-    len *= len;
-    float stretch = (dir.x * dir.x + dir.y * dir.y) *
-                    (1.0 / max(abs(dir.x), abs(dir.y)));
-    vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 + (-0.5) * len);
-    float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
-    float clp = 1.0 / lob;
-
-    vec3 min4 = min(min(vec3(ijfeR.z, ijfeG.z, ijfeB.z),
-                        vec3(klhgR.w, klhgG.w, klhgB.w)),
-                    vec3(ijfeR.y, ijfeG.y, ijfeB.y));
-    min4 = min(min4, vec3(klhgR.x, klhgG.x, klhgB.x));
-    vec3 max4 = max(max(vec3(ijfeR.z, ijfeG.z, ijfeB.z),
-                        vec3(klhgR.w, klhgG.w, klhgB.w)),
-                    vec3(ijfeR.y, ijfeG.y, ijfeB.y));
-    max4 = max(max4, vec3(klhgR.x, klhgG.x, klhgB.x));
-
-    vec3 aC = vec3(0.0);
-    float aW = 0.0;
-    FsrEasuTapF(aC, aW, vec2( 0.0,-1.0)-pp, dir, len2, lob, clp, vec3(bczzR.x, bczzG.x, bczzB.x));
-    FsrEasuTapF(aC, aW, vec2( 1.0,-1.0)-pp, dir, len2, lob, clp, vec3(bczzR.y, bczzG.y, bczzB.y));
-    FsrEasuTapF(aC, aW, vec2(-1.0, 1.0)-pp, dir, len2, lob, clp, vec3(ijfeR.x, ijfeG.x, ijfeB.x));
-    FsrEasuTapF(aC, aW, vec2( 0.0, 1.0)-pp, dir, len2, lob, clp, vec3(ijfeR.y, ijfeG.y, ijfeB.y));
-    FsrEasuTapF(aC, aW, vec2( 0.0, 0.0)-pp, dir, len2, lob, clp, vec3(ijfeR.z, ijfeG.z, ijfeB.z));
-    FsrEasuTapF(aC, aW, vec2(-1.0, 0.0)-pp, dir, len2, lob, clp, vec3(ijfeR.w, ijfeG.w, ijfeB.w));
-    FsrEasuTapF(aC, aW, vec2( 1.0, 1.0)-pp, dir, len2, lob, clp, vec3(klhgR.x, klhgG.x, klhgB.x));
-    FsrEasuTapF(aC, aW, vec2( 2.0, 1.0)-pp, dir, len2, lob, clp, vec3(klhgR.y, klhgG.y, klhgB.y));
-    FsrEasuTapF(aC, aW, vec2( 2.0, 0.0)-pp, dir, len2, lob, clp, vec3(klhgR.z, klhgG.z, klhgB.z));
-    FsrEasuTapF(aC, aW, vec2( 1.0, 0.0)-pp, dir, len2, lob, clp, vec3(klhgR.w, klhgG.w, klhgB.w));
-    FsrEasuTapF(aC, aW, vec2( 1.0, 2.0)-pp, dir, len2, lob, clp, vec3(zzonR.z, zzonG.z, zzonB.z));
-    FsrEasuTapF(aC, aW, vec2( 0.0, 2.0)-pp, dir, len2, lob, clp, vec3(zzonR.w, zzonG.w, zzonB.w));
-
-    return min(max4, max(min4, aC * vec3(1.0 / max(aW, 1e-6))));
-}
-
-// ==========================================================================
-// Catmull-Rom bicubic (16 taps via texelFetch)
-// ==========================================================================
-float _cubic(float x){
-    x = abs(x);
-    if(x < 1.0)  return (1.5 * x - 2.5) * x * x + 1.0;
-    if(x < 2.0)  return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0;
-    return 0.0;
-}
-
-vec3 _bicubic(vec2 coord){
-    vec2 base = floor(coord);
-    vec2 f = coord - base;
-    vec3 sum = vec3(0.0);
-    for(int j = -1; j <= 2; j++){
-        int yy = clamp(int(base.y) + j, 0, int(u_srcSize.y) - 1);
-        float wy = _cubic(f.y - float(j));
-        for(int i = -1; i <= 2; i++){
-            int xx = clamp(int(base.x) + i, 0, int(u_srcSize.x) - 1);
-            float wx = _cubic(f.x - float(i));
-            sum += texelFetch(u_src, ivec2(xx, yy), 0).rgb * (wx * wy);
-        }
-    }
-    return sum;
-}
-
-void main(){
-    vec2 ipInt = floor(gl_FragCoord.xy);
-    vec2 ipTL = vec2(ipInt.x, u_outSize.y - 1.0 - ipInt.y);
-    vec2 ipLocal = ipTL - u_dstRect.xy;
-
-    if(ipLocal.x < 0.0 || ipLocal.y < 0.0 ||
-       ipLocal.x >= u_dstRect.z || ipLocal.y >= u_dstRect.w){
-        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
-
-    if(u_mode == 0){
-        fragColor = vec4(FsrEasuF(ipLocal), 1.0);
-        return;
-    }
-
-    vec2 inCoord = u_srcRect.xy + (ipLocal + 0.5) * (u_srcRect.zw / u_dstRect.zw) - 0.5;
-
-    if(u_mode == 1 || u_mode == 2){
-        ivec2 t = ivec2(floor(inCoord + 0.5));
-        t = clamp(t, ivec2(0), ivec2(u_srcSize) - 1);
-        fragColor = texelFetch(u_src, t, 0);
-    } else {
-        fragColor = vec4(_bicubic(inCoord), 1.0);
-    }
-}
-"""
-
-# RCAS (Robust Contrast Adaptive Sharpening) — applied as a post pass.
-RCAS_FRAG_SRC = """
-#version 400 core
-out vec4 fragColor;
-uniform sampler2D u_src;
-uniform float u_rcas;   // exp2(-stops)
-
-const float FSR_RCAS_LIMIT = 0.25 - (1.0 / 16.0);
-
-vec3 _load(ivec2 p){ return texelFetch(u_src, p, 0).rgb; }
-
-void main(){
-    ivec2 ip = ivec2(floor(gl_FragCoord.xy));
-    vec3 b = _load(ip + ivec2(0, -1));
-    vec3 d = _load(ip + ivec2(-1, 0));
-    vec3 e = _load(ip);
-    vec3 f = _load(ip + ivec2(1, 0));
-    vec3 h = _load(ip + ivec2(0, 1));
-
-    float bL = b.b * 0.5 + (b.r * 0.5 + b.g);
-    float dL = d.b * 0.5 + (d.r * 0.5 + d.g);
-    float eL = e.b * 0.5 + (e.r * 0.5 + e.g);
-    float fL = f.b * 0.5 + (f.r * 0.5 + f.g);
-    float hL = h.b * 0.5 + (h.r * 0.5 + h.g);
-
-    float mn4R = min(min(b.r, d.r), min(f.r, h.r));
-    float mn4G = min(min(b.g, d.g), min(f.g, h.g));
-    float mn4B = min(min(b.b, d.b), min(f.b, h.b));
-    float mx4R = max(max(b.r, d.r), max(f.r, h.r));
-    float mx4G = max(max(b.g, d.g), max(f.g, h.g));
-    float mx4B = max(max(b.b, d.b), max(f.b, h.b));
-
-    float hitMinR = min(mn4R, e.r) / max(4.0 * mx4R, 1e-6);
-    float hitMinG = min(mn4G, e.g) / max(4.0 * mx4G, 1e-6);
-    float hitMinB = min(mn4B, e.b) / max(4.0 * mx4B, 1e-6);
-    float hitMaxR = (1.0 - max(mx4R, e.r)) / (4.0 * mn4R - 4.0 + 1e-6);
-    float hitMaxG = (1.0 - max(mx4G, e.g)) / (4.0 * mn4G - 4.0 + 1e-6);
-    float hitMaxB = (1.0 - max(mx4B, e.b)) / (4.0 * mn4B - 4.0 + 1e-6);
-
-    float lobeR = max(-hitMinR, hitMaxR);
-    float lobeG = max(-hitMinG, hitMaxG);
-    float lobeB = max(-hitMinB, hitMaxB);
-    float lobe = max(-FSR_RCAS_LIMIT, min(max(lobeR, max(lobeG, lobeB)), 0.0)) * u_rcas;
-
-    float rcpL = 1.0 / (4.0 * lobe + 1.0);
-    float r = (lobe * (b.r + d.r + h.r + f.r) + e.r) * rcpL;
-    float g = (lobe * (b.g + d.g + h.g + f.g) + e.g) * rcpL;
-    float bb = (lobe * (b.b + d.b + h.b + f.b) + e.b) * rcpL;
-    fragColor = vec4(r, g, bb, 1.0);
-}
-"""
-
-# Simple passthrough blit.
-BLIT_FRAG_SRC = """
-#version 400 core
-in vec2 v_uv;
-out vec4 fragColor;
-uniform sampler2D u_src;
-void main(){
-    fragColor = texture(u_src, v_uv);
-}
-"""
-
-# Frame generation: motion-compensated interpolation (Lucas-Kanade single
-# iteration optical flow) between the previous and current scaled frames.
-FG_FRAG_SRC = """
-#version 400 core
-in vec2 v_uv;
-out vec4 fragColor;
-uniform sampler2D u_cur;   // current scaled frame
-uniform sampler2D u_prev;  // previous scaled frame
-uniform vec2  u_size;      // output size (texels)
-uniform float u_fgPhase;   // interpolation phase 0..1
-
-float _luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
-
-void main(){
-    vec2 texel = 1.0 / u_size;
-    vec3 cur = texture(u_cur, v_uv).rgb;
-    vec3 prv = texture(u_prev, v_uv).rgb;
-
-    // Spatial gradient of previous frame + temporal difference.
-    float gx = _luma(texture(u_prev, v_uv + vec2( texel.x, 0.0)).rgb)
-             - _luma(texture(u_prev, v_uv + vec2(-texel.x, 0.0)).rgb);
-    float gy = _luma(texture(u_prev, v_uv + vec2(0.0,  texel.y)).rgb)
-             - _luma(texture(u_prev, v_uv + vec2(0.0, -texel.y)).rgb);
-    float dt = _luma(cur) - _luma(prv);
-
-    // Lucas-Kanade single-step optical flow.
-    float g2 = gx * gx + gy * gy + 1e-4;
-    vec2 flow = -vec2(gx, gy) * (dt / g2);
-
-    // Clamp motion vector magnitude.
-    float fl = length(flow);
-    float maxFlow = 8.0;
-    if(fl > maxFlow) flow *= maxFlow / fl;
-
-    // Warp both frames toward the midpoint at phase.
-    vec3 wCur = texture(u_cur,  v_uv - flow * (1.0 - u_fgPhase)).rgb;
-    vec3 wPrv = texture(u_prev, v_uv + flow * u_fgPhase).rgb;
-    vec3 interpolated = mix(wPrv, wCur, u_fgPhase);
-
-    fragColor = vec4(interpolated, 1.0);
-}
-"""
-
-# OSD (text atlas) shaders.
-OSD_VERT_SRC = """
-#version 400 core
-layout(location = 0) in vec2 a_pos;    // top-left origin, pixels
-layout(location = 1) in vec2 a_uv;
-layout(location = 2) in vec4 a_color;
-uniform vec2 u_screenSize;
-out vec2 v_uv;
-out vec4 v_color;
-void main(){
-    float x = (a_pos.x / u_screenSize.x) * 2.0 - 1.0;
-    float y = 1.0 - (a_pos.y / u_screenSize.y) * 2.0;
-    v_uv = a_uv;
-    v_color = a_color;
-    gl_Position = vec4(x, y, 0.0, 1.0);
-}
-"""
-
-OSD_FRAG_SRC = """
-#version 400 core
-in vec2 v_uv;
-in vec4 v_color;
-out vec4 fragColor;
-uniform sampler2D u_atlas;
-uniform int u_solid;
-void main(){
-    if(u_solid == 1){
-        fragColor = v_color;
-        return;
-    }
-    float a = texture(u_atlas, v_uv).r;
-    if(a < 0.05) discard;
-    fragColor = vec4(v_color.rgb, v_color.a * a);
-}
-"""
-
-# ---------------------------------------------------------------------------
-# Shared application state (thread-safe)
-# ---------------------------------------------------------------------------
-class AppState:
-    """Central shared state between GUI, renderer, capture, stats and hotkey
-    threads.  All reads/writes are guarded by a single RLock to keep the hot
-    path allocation-free."""
-
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.running = threading.Event()
-        self.running.set()
-
-        # Settings (mirrored from the GUI).
-        self.mode = 0                 # SCALE_MODE_IDS value
-        self.sharpness = 30           # 0..100
-        self.aspect = "auto"          # "auto" | "custom"
-        self.custom_mult = 1.5
-        self.fg_enabled = False
-        self.capture_delay_ms = 0
-        self.capture_target = "active"       # "fullscreen" | "active" | "window"
-        self.capture_window_id = None        # X11 window id for XComposite
-        self.capture_monitor = 1             # mss monitor index (1 = primary)
-        self.output_monitor = 0              # GLFW monitor index (0 = primary)
-        # Screen rect (x, y, w, h) currently covered by the overlay, written by
-        # the renderer.  Used to refuse full-screen grabs that would capture
-        # the overlay itself (mirror feedback loop).
-        self.overlay_rect = None
-        self.osd_enabled = True
-        self.osd_show_fps = True
-        self.osd_show_cpu = True
-        self.osd_show_gpu = True
-        self.osd_show_ram = True
-        self.hotkey = DEFAULT_HOTKEY
-        self.lang = "en"
-
-        # Runtime state.
-        self.scaling_active = False
-        self.settings_dirty = True    # GUI sets True when settings change
-
-        # Latest capture slot: (array, seq, timestamp).
-        self.capture_lock = threading.Lock()
-        self.latest_frame = None      # BGRA uint8 numpy array (h, w, 4)
-        self.latest_seq = -1
-        self.latest_ts = 0.0
-
-        # Stats (updated by the OSD thread every 500 ms).
-        self.stats_lock = threading.Lock()
-        self.stats = {
-            "capture_fps": 0.0,
-            "render_fps": 0.0,
-            "cpu": 0.0,
-            "ram": 0.0,
-            "gpu": None,
-            "gpu_name": "Unknown",
-            "src_size": (0, 0),
-            "out_size": (0, 0),
-        }
-
-    # -- settings ----------------------------------------------------------
-    def snapshot(self):
-        with self.lock:
-            return {
-                "mode": self.mode,
-                "sharpness": self.sharpness,
-                "aspect": self.aspect,
-                "custom_mult": self.custom_mult,
-                "fg_enabled": self.fg_enabled,
-                "capture_delay_ms": self.capture_delay_ms,
-                "capture_target": self.capture_target,
-                "capture_window_id": self.capture_window_id,
-                "capture_monitor": self.capture_monitor,
-                "output_monitor": self.output_monitor,
-                "osd_enabled": self.osd_enabled,
-                "osd_show_fps": self.osd_show_fps,
-                "osd_show_cpu": self.osd_show_cpu,
-                "osd_show_gpu": self.osd_show_gpu,
-                "osd_show_ram": self.osd_show_ram,
-                "hotkey": self.hotkey,
-                "lang": self.lang,
-            }
-
-    def update(self, **kwargs):
-        with self.lock:
-            for k, v in kwargs.items():
-                if hasattr(self, k):
-                    setattr(self, k, v)
-            self.settings_dirty = True
-
-    def consume_dirty(self):
-        with self.lock:
-            d = self.settings_dirty
-            self.settings_dirty = False
-            return d
-
-    def toggle_scaling(self):
-        with self.lock:
-            self.scaling_active = not self.scaling_active
-            return self.scaling_active
-
-    # -- capture -----------------------------------------------------------
-    def put_frame(self, array, seq, ts):
-        with self.capture_lock:
-            self.latest_frame = array
-            self.latest_seq = seq
-            self.latest_ts = ts
-
-    def get_frame(self):
-        with self.capture_lock:
-            return self.latest_frame, self.latest_seq, self.latest_ts
-
-
-# ---------------------------------------------------------------------------
-# OSD statistics collector thread (sleeps 500 ms between samples)
-# ---------------------------------------------------------------------------
-class StatsCollector(threading.Thread):
-    def __init__(self, state, gpu_monitor):
-        super().__init__(name="BoostLayer-Stats", daemon=True)
-        self.state = state
-        self.gpu = gpu_monitor
-        self._cap_count = 0
-        self._cap_t0 = time.time()
-        self._ren_count = 0
-        self._ren_t0 = time.time()
-
-    def bump_capture(self):
-        self._cap_count += 1
-
-    def bump_render(self):
-        self._ren_count += 1
-
-    def run(self):
-        interval = 0.5
-        while self.state.running.is_set():
-            time.sleep(interval)
-            try:
-                self._sample()
-            except Exception:
-                # Never let the telemetry thread kill the app.
-                pass
-
-    def _sample(self):
-        now = time.time()
-
-        # FPS computed from counters accumulated in the capture/render loops.
-        cap_elapsed = now - self._cap_t0
-        ren_elapsed = now - self._ren_t0
-        cap_fps = self._cap_count / cap_elapsed if cap_elapsed > 0 else 0.0
-        ren_fps = self._ren_count / ren_elapsed if ren_elapsed > 0 else 0.0
-        self._cap_count = 0
-        self._ren_count = 0
-        self._cap_t0 = now
-        self._ren_t0 = now
-
-        cpu = 0.0
-        ram = 0.0
-        if psutil is not None:
-            try:
-                cpu = psutil.cpu_percent(interval=None)
-                ram = psutil.virtual_memory().percent
-            except Exception:
-                pass
-
-        gpu = self.gpu.usage() if self.gpu else None
-
-        with self.state.stats_lock:
-            s = self.state.stats
-            s["capture_fps"] = cap_fps
-            s["render_fps"] = ren_fps
-            s["cpu"] = cpu
-            s["ram"] = ram
-            s["gpu"] = gpu
-            s["gpu_name"] = self.gpu.name if self.gpu else "Unknown"
-            s["rev"] = s.get("rev", 0) + 1
-
-
-# ---------------------------------------------------------------------------
-# Capture thread (mss on X11 / XWayland, grim+portal fallback on Wayland)
-# ---------------------------------------------------------------------------
-def _decode_png(data):
-    """Minimal, dependency-free PNG decoder (8-bit, non-interlaced, color
-    types 0/2/3/4/6).  Returns a BGRA uint8 numpy array (h, w, 4)."""
-    if not data or data[:8] != b"\x89PNG\r\n\x1a\n":
-        raise ValueError("not a PNG")
-    pos = 8
-    width = height = bit_depth = color_type = None
-    idat = bytearray()
-    while pos + 8 <= len(data):
-        length = struct.unpack(">I", data[pos:pos + 4])[0]
-        ctype = data[pos + 4:pos + 8]
-        chunk = data[pos + 8:pos + 8 + length]
-        if ctype == b"IHDR":
-            width, height, bit_depth, color_type, _c, _f, interlace = \
-                struct.unpack(">IIBBBBB", chunk)
-            if interlace != 0:
-                raise ValueError("interlaced PNG unsupported")
-        elif ctype == b"IDAT":
-            idat += chunk
-        elif ctype == b"IEND":
-            break
-        pos += 12 + length
-    if width is None or bit_depth != 8:
-        raise ValueError("unsupported PNG")
-    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
-    raw = zlib.decompress(bytes(idat))
-    stride = width * channels
-    out = bytearray(width * height * channels)
-    prev = bytearray(stride)
-    idx = 0
-    for y in range(height):
-        ft = raw[idx]
-        idx += 1
-        line = bytearray(raw[idx:idx + stride])
-        idx += stride
-        if ft == 1:  # Sub
-            for i in range(channels, stride):
-                line[i] = (line[i] + line[i - channels]) & 0xFF
-        elif ft == 2:  # Up
-            for i in range(stride):
-                line[i] = (line[i] + prev[i]) & 0xFF
-        elif ft == 3:  # Average
-            for i in range(stride):
-                a = line[i - channels] if i >= channels else 0
-                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
-        elif ft == 4:  # Paeth
-            for i in range(stride):
-                a = line[i - channels] if i >= channels else 0
-                b = prev[i]
-                c = prev[i - channels] if i >= channels else 0
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-                line[i] = (line[i] + pr) & 0xFF
-        out[y * stride:(y + 1) * stride] = line
-        prev = line
-
-    if channels == 4:  # RGBA -> BGRA
-        bgra = np.frombuffer(bytes(out), np.uint8).reshape(height, width, 4)
-        bgra[:, :, 0], bgra[:, :, 2] = \
-            bgra[:, :, 2].copy(), bgra[:, :, 0].copy()
-        return bgra
-    if channels == 3:  # RGB -> BGRA
-        rgb = np.frombuffer(bytes(out), np.uint8).reshape(height, width, 3)
-        bgra = np.empty((height, width, 4), np.uint8)
-        bgra[:, :, 0] = rgb[:, :, 2]
-        bgra[:, :, 1] = rgb[:, :, 1]
-        bgra[:, :, 2] = rgb[:, :, 0]
-        bgra[:, :, 3] = 255
-        return bgra
-    if channels == 2:  # gray+alpha
-        ga = np.frombuffer(bytes(out), np.uint8).reshape(height, width, 2)
-        bgra = np.empty((height, width, 4), np.uint8)
-        bgra[:, :, 0] = ga[:, :, 0]
-        bgra[:, :, 1] = ga[:, :, 0]
-        bgra[:, :, 2] = ga[:, :, 0]
-        bgra[:, :, 3] = ga[:, :, 1]
-        return bgra
-    # channels == 1 (gray)
-    g = np.frombuffer(bytes(out), np.uint8).reshape(height, width)
-    bgra = np.empty((height, width, 4), np.uint8)
-    bgra[:, :, 0] = g
-    bgra[:, :, 1] = g
-    bgra[:, :, 2] = g
-    bgra[:, :, 3] = 255
-    return bgra
-
-
-# ---------------------------------------------------------------------------
-# XComposite window capture (python-xlib) — captures an occluded window
-# (e.g. a windowed game covered by the fullscreen overlay) without the mss
-# self-capture feedback loop.
-# ---------------------------------------------------------------------------
-def list_windows():
-    """Return [(window_id, title, width, height), ...] for visible top-level
-    X11 windows, using python-xlib (no external tools)."""
-    try:
-        from Xlib import display, X
-    except ImportError:
-        return []
-    try:
-        d = display.Display()
-    except Exception:
-        return []
-    root = d.screen().root
-    try:
-        net_name = d.intern_atom("_NET_WM_NAME")
-        wm_class_atom = d.intern_atom("WM_CLASS")
-        net_pid_atom = d.intern_atom("_NET_WM_PID")
-    except Exception:
-        net_name = None
-        wm_class_atom = None
-        net_pid_atom = None
-    windows = []
-    exe_hints = None
-    try:
-        children = root.query_tree().children
-    except Exception:
-        children = []
-    for w in children:
-        name = None
-        try:
-            name = w.get_wm_name()
+            while self._lib.XPending(self._display) > 0:
+                event = _XEvent()
+                self._lib.XNextEvent(self._display, ctypes.byref(event))
+                if event.type == 2:  # KeyPress
+                    now = time.monotonic()
+                    if now - self._last_activation > 0.25:
+                        self._last_activation = now
+                        self.activated.emit()
         except Exception:
-            name = None
-        if not name and net_name is not None:
+            self.stop()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self.available = False
+        if self._display is not None and self._lib is not None:
             try:
-                prop = w.get_full_property(net_name, 0)
-                if prop and prop.value:
-                    v = prop.value
-                    name = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+                self._lib.XCloseDisplay(self._display)
             except Exception:
-                name = None
-        if not name and wm_class_atom is not None:
-            try:
-                prop = w.get_full_property(wm_class_atom, 0)
-                if prop and prop.value:
-                    v = prop.value
-                    cls = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
-                    name = cls.split("\x00")[-1] or cls
-            except Exception:
-                name = None
-        comm = None
-        if net_pid_atom is not None:
-            try:
-                prop = w.get_full_property(net_pid_atom, 0)
-                if prop and prop.value is not None:
-                    v = prop.value
-                    pid = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
-                    comm = _pid_comm(pid)
-            except Exception:
-                comm = None
-        if not name and comm:
-            name = comm
-        # Wine/Proton windows often share a generic title — append the .exe
-        # name so the actual game is easy to spot in the list.
-        if name and comm and comm.lower().endswith(".exe") \
-                and comm.lower() not in name.lower():
-            name = "%s [%s]" % (name, comm)
-        try:
-            geo = w.get_geometry()
-            attrs = w.get_attributes()
-        except Exception:
-            continue
-        is_override = bool(attrs.override_redirect)
-        if is_override:
-            # Override-redirect windows (Proton/Wine games, fullscreen) have no
-            # WM title — skip tiny compositor internals, keep game-sized ones
-            # even if currently unmapped.
-            if geo.width < 320 or geo.height < 240:
+                pass
+        self._display = None
+        self._lib = None
+
+
+class FlowLayout(QLayout):
+    """Responsive wrapping grid without an external UI dependency."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        margin: int = 0,
+        h_spacing: int = 16,
+        v_spacing: int = 16,
+    ) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self._h_spacing = h_spacing
+        self._v_spacing = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item: QLayoutItem) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+
+    def clear(self) -> None:
+        while self.count():
+            item = self.takeAt(0)
+            if item is not None:
+                widget = item.widget()
+                if widget is not None:
+                    widget.hide()
+                    widget.setParent(None)
+                    widget.deleteLater()
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom()
+        )
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
                 continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._h_spacing
+            if next_x - self._h_spacing > effective.right() and line_height > 0:
+                x = effective.x()
+                y += line_height + self._v_spacing
+                next_x = x + hint.width() + self._h_spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
+def style_scroll_area(scroll: QScrollArea, color: str = "#0E1013") -> None:
+    """Force a dark viewport; Fusion's default viewport is light and ignores QSS."""
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    viewport = scroll.viewport()
+    viewport.setObjectName("BoostlayerViewport")
+    viewport.setStyleSheet(
+        f"QWidget#BoostlayerViewport {{ background-color: {color}; }}"
+    )
+    viewport.setAutoFillBackground(True)
+    palette = viewport.palette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(color))
+    palette.setColor(QPalette.ColorRole.Base, QColor(color))
+    viewport.setPalette(palette)
+
+
+class CoverView(QWidget):
+    """Rounded, aspect-filled cover with a generated fallback."""
+
+    def __init__(
+        self, title: str, pixmap: QPixmap | None = None, steam: bool = False, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self.title = title
+        self.pixmap = pixmap
+        self.steam = steam
+        self._hover = False
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.setMinimumSize(64, 84)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def sizeHint(self) -> QSize:
+        return QSize(220, 300)
+
+    def set_pixmap(self, pixmap: QPixmap | None) -> None:
+        self.pixmap = pixmap
+        self.update()
+
+    def enterEvent(self, event: QEvent) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        painter.save()
+        painter.setClipPath(path)
+        if self.pixmap is not None and not self.pixmap.isNull():
+            scaled = self.pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            source_x = max(0, (scaled.width() - self.width()) // 2)
+            source_y = max(0, (scaled.height() - self.height()) // 2)
+            painter.drawPixmap(
+                self.rect(),
+                scaled,
+                QRect(source_x, source_y, self.width(), self.height()),
+            )
         else:
-            if attrs.map_state != X.IsViewable:
-                continue
-            if geo.width < 60 or geo.height < 60:
-                continue
-        if not name:
-            name = "Window %dx%d" % (geo.width, geo.height)
-            # Wine/Proton virtual desktops expose an unnamed override-redirect
-            # window.  Use the running .exe name(s) as a hint so the game is
-            # recognisable in the list.
-            if is_override:
-                if exe_hints is None:
-                    exe_hints = _wine_exe_names()
-                if exe_hints:
-                    name = "%s [%s]" % (name, ", ".join(exe_hints[:2]))
-        windows.append((int(w.id), name, geo.width, geo.height))
-    try:
-        d.close()
-    except Exception:
-        pass
-    windows.sort(key=lambda t: t[1].lower())
-    return windows
+            theme = get_theme()
+            gradient = QLinearGradient(0, 0, self.width(), self.height())
+            gradient.setColorAt(0.0, QColor(theme.panel))
+            gradient.setColorAt(0.55, QColor(theme.panel_alt))
+            gradient.setColorAt(1.0, QColor(theme.background))
+            painter.fillRect(self.rect(), gradient)
+            grid_color = QColor(theme.accent)
+            grid_color.setAlpha(36)
+            painter.setPen(grid_color)
+            step = 28
+            for x in range(0, self.width() + step, step):
+                painter.drawLine(x, 0, x, self.height())
+            for y in range(0, self.height() + step, step):
+                painter.drawLine(0, y, self.width(), y)
+            initials = "".join(
+                part[0] for part in re.split(r"\W+", self.title) if part
+            )[:2].upper() or "B"
+            font = QFont("DejaVu Sans", max(24, min(54, self.width() // 4)))
+            font.setWeight(QFont.Weight.Black)
+            painter.setFont(font)
+            painter.setPen(QColor(theme.accent))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, initials)
+
+        overlay = QLinearGradient(0, self.height() * 0.45, 0, self.height())
+        overlay.setColorAt(0.0, QColor(0, 0, 0, 0))
+        overlay.setColorAt(1.0, QColor(3, 8, 11, 210))
+        painter.fillRect(self.rect(), overlay)
+        if self.steam:
+            theme = get_theme()
+            badge_color = QColor(theme.accent)
+            badge_color.setAlpha(130)
+            painter.setPen(QColor(theme.text))
+            badge = QRectF(10, 10, 65, 21)
+            painter.setBrush(QColor(4, 13, 17, 200))
+            painter.setPen(QPen(badge_color, 1))
+            painter.drawRoundedRect(badge, 5, 5)
+            painter.setFont(QFont("DejaVu Sans Mono", 7, QFont.Weight.Bold))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, tr("STEAM"))
+        painter.restore()
+
+        theme = get_theme()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(
+            QPen(QColor(theme.accent) if self._hover else QColor(theme.border), 1.4)
+        )
+        painter.drawRoundedRect(rect, 8, 8)
+        painter.end()
 
 
-def _mask_to_byte(mask):
-    """Return the byte offset (0-based) of the lowest set bit in a channel mask."""
-    if not mask:
-        return 0
-    m = int(mask)
-    return ((m & -m).bit_length() - 1) // 8
+class TitleBar(QFrame):
+    menu_requested = pyqtSignal()
+
+    def __init__(self, window: QWidget) -> None:
+        super().__init__(window)
+        self._window = window
+        self._drag_offset: QPoint | None = None
+        self.setObjectName("TitleBar")
+        self.setFixedHeight(54)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 8, 8, 8)
+        layout.setSpacing(10)
+
+        mark = QLabel(tr("BL"))
+        mark.setObjectName("BrandMark")
+        layout.addWidget(mark)
+        labels = QVBoxLayout()
+        labels.setSpacing(0)
+        title = QLabel(tr("BOOSTLAYER"))
+        title.setStyleSheet("font-weight:800; color:#E9FAFF; font-size:9pt; letter-spacing:2px;")
+        subtitle = QLabel(tr("GAME RUNTIME CONTROL // {version}", version=APP_VERSION))
+        subtitle.setObjectName("BrandSub")
+        labels.addWidget(title)
+        labels.addWidget(subtitle)
+        layout.addLayout(labels)
+        layout.addStretch(1)
+
+        menu_button = QToolButton()
+        menu_button.setObjectName("TitleMenu")
+        menu_button.setText(tr("⋮"))
+        menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        menu_button.clicked.connect(self.menu_requested.emit)
+        layout.addWidget(menu_button)
+
+        minimize = QPushButton(tr("—"))
+        minimize.setObjectName("WindowButton")
+        minimize.setToolTip(tr("Minimalizuj"))
+        minimize.clicked.connect(window.showMinimized)
+        layout.addWidget(minimize)
+
+        maximize = QPushButton(tr("□"))
+        maximize.setObjectName("WindowButton")
+        maximize.setToolTip(tr("Maksymalizuj"))
+        maximize.clicked.connect(self._toggle_maximize)
+        layout.addWidget(maximize)
+
+        close = QPushButton(tr("×"))
+        close.setObjectName("CloseButton")
+        close.setToolTip(tr("Zamknij"))
+        close.clicked.connect(window.close)
+        layout.addWidget(close)
+
+    def _toggle_maximize(self) -> None:
+        if self._window.isMaximized():
+            self._window.showNormal()
+        else:
+            self._window.showMaximized()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle = self._window.windowHandle()
+            moved = False
+            if handle is not None and hasattr(handle, "startSystemMove"):
+                try:
+                    moved = bool(handle.startSystemMove())
+                except (RuntimeError, TypeError):
+                    moved = False
+            if not moved:
+                self._drag_offset = (
+                    event.globalPosition().toPoint()
+                    - self._window.frameGeometry().topLeft()
+                )
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (
+            self._drag_offset is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and not self._window.isMaximized()
+        ):
+            self._window.move(event.globalPosition().toPoint() - self._drag_offset)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._toggle_maximize()
+        super().mouseDoubleClickEvent(event)
 
 
-def _pid_comm(pid):
-    """Resolve a PID to its short process name (e.g. 'DP.exe')."""
-    if not pid:
-        return None
-    try:
-        with open("/proc/%d/comm" % int(pid)) as fh:
-            return fh.read().strip()
-    except Exception:
-        return None
+class ColorButton(QPushButton):
+    color_changed = pyqtSignal(str)
+
+    def __init__(self, color: str, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._color = color if QColor(color).isValid() else "#00E5FF"
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(34)
+        self.setMinimumWidth(120)
+        self.clicked.connect(self._choose)
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        color = QColor(self._color)
+        text = "#061014" if color.lightness() > 150 else "#FFFFFF"
+        self.setText(self._color.upper())
+        self.setStyleSheet(
+            f"QPushButton {{ background:{self._color}; color:{text}; "
+            "border:1px solid #3A4750; border-radius:6px; "
+            "font-family:'DejaVu Sans Mono'; font-weight:700; padding:6px; }"
+            "QPushButton:hover { border:1px solid #FFFFFF; }"
+        )
+
+    def color(self) -> str:
+        return self._color
+
+    def set_color(self, color: str, emit: bool = False) -> None:
+        if QColor(color).isValid():
+            self._color = color.lower()
+            self._apply_style()
+            if emit:
+                self.color_changed.emit(self._color)
+
+    def _choose(self) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._color), self, tr("Kolor: {name}", name=self._title)
+        )
+        if chosen.isValid():
+            self.set_color(chosen.name(), emit=True)
 
 
-def active_window_id():
-    """Return the currently-focused (active) X11 window id, or None."""
-    try:
-        from Xlib import display, X
-    except ImportError:
-        return None
-    try:
-        d = display.Display()
-    except Exception:
-        return None
-    try:
-        root = d.screen().root
-        atom = d.intern_atom("_NET_ACTIVE_WINDOW")
-        prop = root.get_full_property(atom, X.AnyPropertyType)
-        if prop and prop.value is not None:
-            v = prop.value
-            if isinstance(v, (list, tuple)):
-                return int(v[0]) if v else None
-            return int(v)
-    except Exception:
-        pass
-    finally:
+class OverlayPreview(QWidget):
+    """Approximate MangoHud preview rendered with QPainter (no webview)."""
+
+    position_selected = pyqtSignal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._profile: dict[str, Any] = dict(db.DEFAULT_MANGOHUD)
+        self._scaling = "native"
+        self.setMinimumSize(360, 300)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tr("Kliknij, aby zakotwiczyć HUD w jednej z dziewięciu stref."))
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        point = event.position()
+        column = min(2, max(0, int(point.x() * 3 / max(1, self.width()))))
+        row = min(2, max(0, int(point.y() * 3 / max(1, self.height()))))
+        vertical = ("top", "middle", "bottom")[row]
+        horizontal = ("left", "center", "right")[column]
+        self.position_selected.emit(f"{vertical}-{horizontal}")
+
+    def set_profile(self, profile: dict[str, Any], scaling: str = "native") -> None:
+        self._profile = dict(profile)
+        self._scaling = scaling
+        self.update()
+
+    @staticmethod
+    def _pos_color(value: str, fallback: str) -> QColor:
+        color = QColor(value)
+        return color if color.isValid() else QColor(fallback)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        gradient = QLinearGradient(0, 0, rect.width(), rect.height())
+        gradient.setColorAt(0.0, QColor("#0A1217"))
+        gradient.setColorAt(0.55, QColor("#101822"))
+        gradient.setColorAt(1.0, QColor("#1C1018"))
+        painter.fillRect(rect, gradient)
+        painter.setPen(QPen(QColor(255, 255, 255, 10), 1))
+        for x in range(0, rect.width(), 32):
+            painter.drawLine(x, 0, x, rect.height())
+        for y in range(0, rect.height(), 32):
+            painter.drawLine(0, y, rect.width(), y)
+
+        profile = self._profile
+        rows: list[tuple[str, str, str]] = []
+        if profile.get("show_fps", True):
+            rows.append(("144", "FPS", "#00E5FF"))
+        if profile.get("show_gpu", True):
+            gpu_temp = "  61°C" if profile.get("show_temps", True) else ""
+            rows.append(("GPU 74%", f"  4.2 GB{gpu_temp}", "#42F5A7"))
+        if profile.get("show_cpu", True):
+            cpu_temp = "  55°C" if profile.get("show_temps", True) else ""
+            rows.append(("CPU 43%", f"  5.1 GHz{cpu_temp}", "#00B8FF"))
+        if profile.get("show_ram", True) or profile.get("show_vram", True):
+            parts = []
+            if profile.get("show_ram", True):
+                parts.append("RAM 12.4G")
+            if profile.get("show_vram", True):
+                parts.append("VRAM 7.8G")
+            rows.append((" / ".join(parts), "", "#C9A7FF"))
+        if profile.get("show_frametime", True):
+            rows.append(("FT 6.9 ms", "", "#FFB347"))
+        rows.append((tr("Scaling: {label}", label=scaling_label(self._scaling)), "", "#DCEBF1"))
+
+        width = min(390, max(280, rect.width() - 36))
+        row_height = 24
+        height = row_height * len(rows) + 28
+        position = str(profile.get("position", "top-left"))
+        margin = 18
+        if position.endswith("left"):
+            x = margin
+        elif position.endswith("right"):
+            x = rect.width() - width - margin
+        else:
+            x = (rect.width() - width) // 2
+        if position.startswith("top"):
+            y = margin
+        elif position.startswith("bottom"):
+            y = rect.height() - height - margin
+        else:
+            y = (rect.height() - height) // 2
+
+        alpha = int(max(0.0, min(1.0, float(profile.get("background_alpha", 0.35)))) * 255)
+        panel = QRectF(x, y, width, height)
+        painter.setBrush(QColor(7, 12, 15, alpha))
+        painter.setPen(QPen(QColor(0, 229, 255, 90), 1))
+        radius = max(0, min(20, int(profile.get("round_corners", 8))))
+        painter.drawRoundedRect(panel, radius, radius)
+        painter.setPen(QPen(self._pos_color(str(profile.get("accent", "#00E5FF")), "#00E5FF"), 3))
+        painter.drawLine(
+            QPointF(panel.left() + 1, panel.top() + 8),
+            QPointF(panel.left() + 1, panel.bottom() - 8),
+        )
+        font_size = max(8, min(24, int(profile.get("font_size", 18)) // 2 + 2))
+        painter.setFont(QFont("DejaVu Sans Mono", font_size, QFont.Weight.DemiBold))
+        text_color = self._pos_color(str(profile.get("text_color", "#E6FAFF")), "#E6FAFF")
+        for index, (left, right, color_value) in enumerate(rows):
+            row_y = panel.top() + 14 + index * row_height
+            painter.setPen(text_color)
+            painter.drawText(
+                QRectF(panel.left() + 14, row_y, width - 26, row_height),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                left,
+            )
+            if right:
+                painter.setPen(self._pos_color(color_value, "#00E5FF"))
+                painter.drawText(
+                    QRectF(panel.left() + 14, row_y, width - 28, row_height),
+                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                    right,
+                )
+            if left.startswith("FT") and profile.get("show_frametime", True):
+                graph_width = 92
+                graph_x = panel.right() - graph_width - 16
+                for bar in range(18):
+                    bar_height = 3 + ((bar * 7 + index * 3) % 12)
+                    painter.setBrush(self._pos_color("#FFB347", "#FFB347"))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawRect(
+                        QRectF(
+                            graph_x + bar * 5,
+                            row_y + row_height - 7 - bar_height,
+                            3,
+                            bar_height,
+                        )
+                    )
+        painter.setPen(QColor("#5F7681"))
+        painter.setFont(QFont("DejaVu Sans Mono", 7))
+        painter.drawText(
+            QRect(12, rect.height() - 20, 220, 14),
+            Qt.AlignmentFlag.AlignLeft,
+            tr("PODGLĄD // MANGOHUD"),
+        )
+        painter.end()
+
+
+class GameCard(QFrame):
+    launch_requested = pyqtSignal(int)
+    edit_requested = pyqtSignal(int)
+    delete_requested = pyqtSignal(int)
+    context_requested = pyqtSignal(int, object)
+
+    def __init__(self, game: dict[str, Any], cover: QPixmap | None, parent=None) -> None:
+        super().__init__(parent)
+        self.game = game
+        self.setObjectName("Card")
+        self.setFixedWidth(244)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.context_requested.emit(
+                int(self.game["id"]), self.mapToGlobal(pos)
+            )
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(9, 9, 9, 10)
+        layout.setSpacing(7)
+        self.cover = CoverView(
+            str(game.get("name", "?")), cover, bool(game.get("is_steam"))
+        )
+        self.cover.setFixedHeight(310)
+        layout.addWidget(self.cover)
+        title = QLabel(str(game.get("name", tr("Bez nazwy"))))
+        title.setObjectName("CardTitle")
+        title.setToolTip(str(game.get("name", "")))
+        title.setMaximumHeight(24)
+        layout.addWidget(title)
+        bits = game.get("_bits")
+        bit_suffix = f"  |  {bits}-BIT" if bits else ""
+        meta = QLabel(
+            f"{scaling_label(str(game.get('scaling_mode', 'native')))}  |  "
+            f"{int(game.get('fps_limit', 0)) or '∞'} FPS{bit_suffix}"
+        )
+        meta.setObjectName("CardMeta")
+        meta.setToolTip(meta.text())
+        layout.addWidget(meta)
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
+        play = QPushButton(tr("▶  GRAJ"))
+        play.setObjectName("CardPlay")
+        play.clicked.connect(lambda: self.launch_requested.emit(int(self.game["id"])))
+        actions.addWidget(play, 1)
+        edit = QPushButton(tr("✎"))
+        edit.setObjectName("CardIcon")
+        edit.setToolTip(tr("Edytuj"))
+        edit.clicked.connect(lambda: self.edit_requested.emit(int(self.game["id"])))
+        actions.addWidget(edit)
+        delete = QPushButton(tr("×"))
+        delete.setObjectName("CardIcon")
+        delete.setProperty("class", "danger")
+        delete.setStyleSheet(
+            "QPushButton { background:transparent; border:1px solid #2A343D; "
+            "border-radius:6px; color:#8FA3AE; padding:5px 8px; }"
+            "QPushButton:hover { color:#FF4D6D; border-color:#B92341; }"
+        )
+        delete.setToolTip(tr("Usuń z biblioteki"))
+        delete.clicked.connect(lambda: self.delete_requested.emit(int(self.game["id"])))
+        actions.addWidget(delete)
+        layout.addLayout(actions)
+        self.setFixedHeight(430)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.launch_requested.emit(int(self.game["id"]))
+        super().mouseDoubleClickEvent(event)
+
+
+class CompactGameRow(QFrame):
+    launch_requested = pyqtSignal(int)
+    edit_requested = pyqtSignal(int)
+    delete_requested = pyqtSignal(int)
+    context_requested = pyqtSignal(int, object)
+
+    def __init__(self, game: dict[str, Any], cover: QPixmap | None, parent=None) -> None:
+        super().__init__(parent)
+        self.game = game
+        self.setObjectName("CompactRow")
+        self.setFixedHeight(104)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(
+            lambda pos: self.context_requested.emit(
+                int(self.game["id"]), self.mapToGlobal(pos)
+            )
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 7, 10, 7)
+        layout.setSpacing(12)
+        cover_widget = CoverView(
+            str(game.get("name", "?")), cover, bool(game.get("is_steam"))
+        )
+        cover_widget.setFixedSize(64, 88)
+        layout.addWidget(cover_widget)
+        info = QVBoxLayout()
+        info.setSpacing(3)
+        title = QLabel(str(game.get("name", tr("Bez nazwy"))))
+        title.setObjectName("CardTitle")
+        info.addWidget(title)
+        path = QLabel(str(game.get("exe_path", "")))
+        path.setObjectName("CardMeta")
+        path.setToolTip(path.text())
+        info.addWidget(path)
+        bits = game.get("_bits")
+        if game.get("is_steam"):
+            source_text = f"STEAM  //  APPID {game.get('steam_appid', '?')}"
+        else:
+            source_text = "STANDALONE"
+        if bits:
+            source_text += f"  //  {bits}-BIT"
+        source = QLabel(source_text)
+        source.setObjectName("Accent")
+        source.setStyleSheet("font-size:8pt; font-family:'DejaVu Sans Mono';")
+        info.addWidget(source)
+        layout.addLayout(info, 1)
+        profile = QLabel(scaling_label(str(game.get("scaling_mode", "native"))))
+        profile.setObjectName("Muted")
+        profile.setMinimumWidth(170)
+        layout.addWidget(profile)
+        fps = QLabel(f"{int(game.get('fps_limit', 0)) or '∞'} FPS")
+        fps.setObjectName("Accent")
+        fps.setMinimumWidth(62)
+        fps.setStyleSheet("font-family:'DejaVu Sans Mono'; font-weight:700;")
+        layout.addWidget(fps)
+        play = QPushButton(tr("▶  GRAJ"))
+        play.setObjectName("CardPlay")
+        play.clicked.connect(lambda: self.launch_requested.emit(int(self.game["id"])))
+        layout.addWidget(play)
+        edit = QPushButton(tr("✎"))
+        edit.setObjectName("CardIcon")
+        edit.setToolTip(tr("Edytuj"))
+        edit.clicked.connect(lambda: self.edit_requested.emit(int(self.game["id"])))
+        layout.addWidget(edit)
+        delete = QPushButton(tr("×"))
+        delete.setObjectName("CardIcon")
+        delete.setToolTip(tr("Usuń"))
+        delete.clicked.connect(lambda: self.delete_requested.emit(int(self.game["id"])))
+        layout.addWidget(delete)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.launch_requested.emit(int(self.game["id"]))
+        super().mouseDoubleClickEvent(event)
+
+
+class GameDialog(QDialog):
+    """Add/edit dialog.  All values are saved through bound SQL parameters."""
+
+    def __init__(
+        self,
+        database: Database,
+        game: dict[str, Any] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.db = database
+        self.game = game
+        self._cover_source = str((game or {}).get("cover_path", ""))
+        self.setWindowTitle(tr("Edytuj grę") if game else tr("Dodaj grę"))
+        self.setModal(True)
+        self.resize(760, 790)
+        self.setWindowIcon(app_icon())
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 18, 22, 18)
+        outer.setSpacing(14)
+
+        kicker = QLabel(
+            tr(
+                "BIBLIOTEKA // {section}",
+                section=tr("EDYCJA") if game else tr("NOWY WPIS"),
+            )
+        )
+        kicker.setObjectName("PageKicker")
+        outer.addWidget(kicker)
+        heading = QLabel(tr("Konfiguracja gry"))
+        heading.setObjectName("PageTitle")
+        outer.addWidget(heading)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        style_scroll_area(scroll, "#0E1114")
+        form_host = QWidget()
+        form = QFormLayout(form_host)
+        form.setContentsMargins(2, 2, 12, 2)
+        form.setSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.name_edit = QLineEdit(str((game or {}).get("name", "")))
+        self.name_edit.setPlaceholderText(tr("Nazwa widoczna w bibliotece"))
+        form.addRow(tr("Nazwa"), self.name_edit)
+
+        self.exe_edit = QLineEdit(str((game or {}).get("exe_path", "")))
+        self.exe_edit.setPlaceholderText(tr("/ścieżka/do/gry.exe"))
+        form.addRow(tr("Plik EXE"), self._path_row(self.exe_edit, "file"))
+
+        self.cover_edit = QLineEdit(self._cover_source)
+        self.cover_edit.setPlaceholderText(tr("Opcjonalna okładka (JPG/PNG/WebP)"))
+        cover_row = self._path_row(self.cover_edit, "image")
+        clear_cover = QPushButton(tr("Wyczyść"))
+        clear_cover.setObjectName("GhostButton")
+        clear_cover.clicked.connect(lambda: self.cover_edit.clear())
+        cover_row.layout().addWidget(clear_cover)
+        form.addRow(tr("Okładka"), cover_row)
+
+        self.runner_combo = QComboBox()
+        self.runner_combo.addItem(tr("Automatycznie (domyślny runner)"), "")
+        for runner in discover_runners():
+            self.runner_combo.addItem(runner.label, runner.path)
+        current_runner = str((game or {}).get("runner_path", ""))
+        if current_runner:
+            index = self.runner_combo.findData(current_runner)
+            if index < 0:
+                self.runner_combo.addItem(tr("Własny: {name}", name=current_runner), current_runner)
+                index = self.runner_combo.count() - 1
+            self.runner_combo.setCurrentIndex(index)
+        runner_row = QWidget()
+        runner_layout = QHBoxLayout(runner_row)
+        runner_layout.setContentsMargins(0, 0, 0, 0)
+        runner_layout.setSpacing(6)
+        runner_layout.addWidget(self.runner_combo, 1)
+        browse_runner = QPushButton("...")
+        browse_runner.setObjectName("GhostButton")
+        browse_runner.setFixedWidth(42)
+        browse_runner.clicked.connect(self._browse_runner)
+        runner_layout.addWidget(browse_runner)
+        form.addRow(tr("Runner"), runner_row)
+
+        self.prefix_edit = QLineEdit(str((game or {}).get("wine_prefix", "")))
+        self.prefix_edit.setPlaceholderText(tr("Puste = izolowany prefix zostanie utworzony automatycznie"))
+        prefix_row = self._path_row(self.prefix_edit, "dir")
+        auto_prefix = QPushButton(tr("Nowy"))
+        auto_prefix.setObjectName("GhostButton")
+        auto_prefix.setToolTip(tr("Wygeneruj nowy, izolowany WINEPREFIX"))
+        auto_prefix.clicked.connect(self._new_prefix)
+        prefix_row.layout().addWidget(auto_prefix)
+        form.addRow(tr("WINEPREFIX"), prefix_row)
+
+        self.env_edit = QPlainTextEdit(str((game or {}).get("env_vars", "")))
+        self.env_edit.setPlaceholderText(
+            tr("DXVK_HUD=0\nWINE_FULLSCREEN_FSR=1\nMESA_VK_WSI_PRESENT_MODE=mailbox"))
+
+        self.env_edit.setFixedHeight(100)
+        form.addRow(tr("Zmienne env"), self.env_edit)
+
+        self.args_edit = QLineEdit(str((game or {}).get("launch_args", "")))
+        self.args_edit.setPlaceholderText(tr('-windowed -novid +fps_max 144'))
+        form.addRow(tr("Argumenty"), self.args_edit)
+
+        self.scaling_combo = QComboBox()
+        for key, profile in SCALING_PROFILES.items():
+            self.scaling_combo.addItem(str(profile["label"]), key)
+        scaling = str((game or {}).get("scaling_mode", "native"))
+        index = self.scaling_combo.findData(scaling)
+        self.scaling_combo.setCurrentIndex(max(0, index))
+        form.addRow(tr("Skalowanie"), self.scaling_combo)
+        self.scaling_note = QLabel("")
+        self.scaling_note.setObjectName("Muted")
+        self.scaling_note.setWordWrap(True)
+        form.addRow("", self.scaling_note)
+        self.scaling_combo.currentIndexChanged.connect(self._update_scaling_note)
+        self._update_scaling_note()
+
+        self.fps_combo = QComboBox()
+        for value in FPS_LIMITS:
+            self.fps_combo.addItem(tr("Bez limitu") if value == 0 else f"{value} FPS", value)
+        fps = int((game or {}).get("fps_limit", 0))
+        index = self.fps_combo.findData(fps)
+        self.fps_combo.setCurrentIndex(max(0, index))
+        form.addRow(tr("Limit FPS"), self.fps_combo)
+
+        if game and game.get("is_steam"):
+            steam_host = QWidget()
+            steam_layout = QVBoxLayout(steam_host)
+            steam_layout.setContentsMargins(0, 0, 0, 0)
+            steam_layout.setSpacing(6)
+            steam_info = QLabel(
+                tr(
+                    "<span style='color:#00E5FF'>STEAM</span>  AppID {appid} — "
+                    "wpis zaimportowany. Uruchamianie odbywa się przez klienta "
+                    "Steam; wrapper aplikuje MangoHud, skalowanie i limit FPS. "
+                    "Runner i WINEPREFIX są właściwościami Steam/Protona.",
+                    appid=html.escape(str(game.get("steam_appid", ""))),
+                )
+            )
+            steam_info.setWordWrap(True)
+            steam_layout.addWidget(steam_info)
+            copy_option = QPushButton(tr("KOPIUJ OPCJĘ URUCHAMIANIA STEAM"))
+            copy_option.setObjectName("GhostButton")
+            copy_option.clicked.connect(self._copy_steam_option)
+            steam_layout.addWidget(copy_option, 0, Qt.AlignmentFlag.AlignLeft)
+            form.addRow(tr("Źródło"), steam_host)
+
+        note = QLabel(
+            tr("Runner i prefix są izolowane per gra. Zmienne env: jedna para "
+            "KEY=VALUE na linię. Argumenty są dzielone jak w POSIX shell.")
+ )
+        note.setObjectName("Muted")
+        note.setWordWrap(True)
+        form.addRow("", note)
+        scroll.setWidget(form_host)
+        outer.addWidget(scroll, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if save_button:
+            save_button.setText(tr("ZAPISZ"))
+            save_button.setObjectName("PrimaryButton")
+        if cancel_button:
+            cancel_button.setText(tr("ANULUJ"))
+            cancel_button.setObjectName("GhostButton")
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    def _path_row(self, line_edit: QLineEdit, mode: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(line_edit, 1)
+        button = QPushButton("...")
+        button.setObjectName("GhostButton")
+        button.setFixedWidth(42)
+        button.clicked.connect(partial(self._browse, line_edit, mode))
+        layout.addWidget(button)
+        return row
+
+    def _browse(self, line_edit: QLineEdit, mode: str) -> None:
+        initial = line_edit.text().strip() or str(Path.home())
+        if mode == "file":
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                tr("Wybierz plik EXE"),
+                initial,
+                tr("Programy Windows (*.exe *.EXE);;Wszystkie pliki (*)"),
+            )
+        elif mode == "image":
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                tr("Wybierz okładkę"),
+                initial,
+                tr("Obrazy (*.png *.jpg *.jpeg *.webp *.bmp);;Wszystkie pliki (*)"),
+            )
+        else:
+            path = QFileDialog.getExistingDirectory(
+                self, tr("Wybierz katalog"), initial
+            )
+        if path:
+            line_edit.setText(path)
+
+    def _browse_runner(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("Wskaż plik wine"),
+            str(db.RUNNERS_DIR),
+            tr("Wine (wine wine64);;Wszystkie pliki (*)"),
+        )
+        if not path:
+            return
+        index = self.runner_combo.findData(path)
+        if index < 0:
+            self.runner_combo.addItem(tr("Własny: {name}", name=path), path)
+            index = self.runner_combo.count() - 1
+        self.runner_combo.setCurrentIndex(index)
+
+    def _new_prefix(self) -> None:
+        self.prefix_edit.setText(db.make_prefix(self.name_edit.text() or "game"))
+
+    def _update_scaling_note(self) -> None:
+        key = str(self.scaling_combo.currentData() or "native")
+        profile = SCALING_PROFILES.get(key, SCALING_PROFILES["native"])
+        needs_gamescope = profile.get("kind") in {"gamescope", "crt"}
+        if needs_gamescope and not shutil.which("gamescope"):
+            self.scaling_note.setText(
+                tr("Gamescope nie jest zainstalowany na tym systemie. Profil "
+                "zostanie pominięty, a gra uruchomi się natywnie. Zainstaluj "
+                "Gamescope lub użyj profilu Proton FSR.")
+)
+        elif needs_gamescope:
+            self.scaling_note.setText(
+                tr("Profil wymaga Gamescope — wykryto Gamescope w PATH.")
+ )
+        else:
+            self.scaling_note.setText("")
+
+    def _copy_steam_option(self) -> None:
         try:
-            d.close()
-        except Exception:
+            path = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        self.db.set_setting("steam_wrapper", str(path))
+        QApplication.clipboard().setText(steam_launch_option(path))
+        QMessageBox.information(
+            self,
+            tr("Steam wrapper"),
+            tr("Opcja uruchamiania została skopiowana do schowka.\n\n"
+            "Wklej ją w Steam → Właściwości gry → Opcje uruchamiania."),
+        )
+
+    def _import_cover(self, path: str) -> str:
+        if not path:
+            return ""
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise ValueError(tr("Wybrany plik okładki nie istnieje."))
+        try:
+            if source.resolve().parent == db.COVERS_DIR.resolve():
+                return str(source.resolve())
+        except OSError:
             pass
-    return None
+        pixmap = QPixmap(str(source))
+        if pixmap.isNull():
+            raise ValueError(tr("Nie można odczytać wybranego obrazu."))
+        suffix = source.suffix.lower() if source.suffix else ".jpg"
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            suffix = ".jpg"
+        destination = db.COVERS_DIR / f"local_{uuid.uuid4().hex}{suffix}"
+        shutil.copyfile(source, destination)
+        return str(destination)
 
-
-def _has_wm_state(win):
-    try:
-        prop = win.get_full_property(win.display.intern_atom("WM_STATE"), 0)
-        return prop is not None
-    except Exception:
-        return False
-
-
-def _find_client_window(win, depth=0):
-    """Return the real client window below a WM frame (top-level window).
-    Frames carry no WM_STATE; the client inside them does."""
-    if win is None or depth > 4:
-        return None
-    if _has_wm_state(win):
-        return win
-    try:
-        children = win.query_tree().children
-    except Exception:
-        return None
-    for child in children:
-        found = _find_client_window(child, depth + 1)
-        if found is not None:
-            return found
-    return None
-
-
-def select_window_by_click():
-    """Grab the pointer, let the user click a window, and return its client
-    window id (or None).  Right-click cancels; gives up after 15 s."""
-    import select
-    try:
-        from Xlib import display, X
-    except ImportError:
-        return None
-    try:
-        d = display.Display()
-    except Exception:
-        return None
-    root = d.screen().root
-    child = None
-    cursor = None
-    try:
-        # Visual feedback: crosshair cursor while picking.
+    def _save(self) -> None:
         try:
-            from Xlib import Xcursorfont
-            font = d.open_font("cursor")
-            cursor = font.create_glyph_cursor(
-                font, Xcursorfont.crosshair, Xcursorfont.crosshair + 1,
-                (65535, 65535, 65535), (0, 0, 0))
-            root.change_attributes(cursor=cursor)
-        except Exception:
-            cursor = None
-        root.grab_pointer(True, X.ButtonPressMask, X.GrabModeAsync,
-                          X.GrabModeAsync, X.NONE, X.NONE, X.CurrentTime)
-        d.sync()
-        deadline = time.time() + 15.0
-        while time.time() < deadline:
-            if not d.pending_events():
-                select.select([d.fileno()], [], [], 0.1)
-                continue
-            event = d.next_event()
-            if event.type != X.ButtonPress:
-                continue
-            if getattr(event, "detail", 1) == 3:   # right button -> cancel
-                child = None
-                break
-            child = getattr(event, "child", None)
-            if not child:
-                child = root.query_pointer().child
-            break
-    except Exception:
-        child = None
-    finally:
+            name = self.name_edit.text().strip()
+            exe = self.exe_edit.text().strip()
+            if not name:
+                raise ValueError(tr("Podaj nazwę gry."))
+            if not exe:
+                raise ValueError(tr("Wskaż plik EXE gry."))
+            env_text = self.env_edit.toPlainText()
+            parse_env_vars(env_text)
+            args = self.args_edit.text().strip()
+            if args:
+                shlex.split(args, posix=True)
+            is_steam = int((self.game or {}).get("is_steam", 0))
+            prefix = self.prefix_edit.text().strip()
+            if not prefix and not is_steam:
+                prefix = db.make_prefix(name)
+            elif prefix:
+                Path(prefix).expanduser().mkdir(parents=True, exist_ok=True)
+            cover = self._import_cover(self.cover_edit.text().strip())
+            values = {
+                "name": name,
+                "exe_path": exe,
+                "runner_path": str(self.runner_combo.currentData() or ""),
+                "wine_prefix": prefix,
+                "env_vars": env_text,
+                "launch_args": args,
+                "scaling_mode": str(self.scaling_combo.currentData() or "native"),
+                "fps_limit": int(self.fps_combo.currentData() or 0),
+                "is_steam": is_steam,
+                "steam_appid": str((self.game or {}).get("steam_appid", "")),
+                "cover_path": cover,
+            }
+            if self.game:
+                self.db.update_game(int(self.game["id"]), **values)
+            else:
+                self.db.add_game(**values)
+        except Exception as exc:
+            QMessageBox.warning(self, tr("Nie zapisano"), str(exc))
+            return
+        self.accept()
+class SettingsPage(QWidget):
+    toast = pyqtSignal(str)
+    steam_sync_requested = pyqtSignal()
+    steam_wrapper_batch_requested = pyqtSignal()
+    steam_restore_requested = pyqtSignal()
+    clear_cache_requested = pyqtSignal()
+    settings_changed = pyqtSignal()
+    theme_changed = pyqtSignal(str)
+    language_changed = pyqtSignal(str)
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        self._dep_process: QProcess | None = None
+        self._dep_queue: list[DependencyGroup] = []
+        self._dep_failures: list[str] = []
+        self._m32_process: QProcess | None = None
+        self._gamepad_process: QProcess | None = None
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 24, 28, 20)
+        outer.setSpacing(16)
+        kicker = QLabel(tr("SYSTEM // GLOBAL"))
+        kicker.setObjectName("PageKicker")
+        outer.addWidget(kicker)
+        heading = QLabel(tr("Ustawienia globalne"))
+        heading.setObjectName("PageTitle")
+        outer.addWidget(heading)
+        subtitle = QLabel(
+            tr("Wspólny runner, środowisko oraz polityka uruchamiania. "
+            "Ustawienia per gra nadpisują runner i prefix.")
+)
+        subtitle.setObjectName("PageSubtitle")
+        outer.addWidget(subtitle)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        style_scroll_area(scroll)
+        host = QWidget()
+        body = QVBoxLayout(host)
+        body.setContentsMargins(0, 4, 8, 8)
+        body.setSpacing(14)
+
+        appearance, appearance_layout = self._panel(
+            tr("WYGLĄD"),
+            tr("Motyw interfejsu, okna konsolowego, tray i ikony aplikacji."),
+        )
+        appearance_form = QFormLayout()
+        appearance_form.setSpacing(11)
+        self.language_combo = QComboBox()
+        for code, name in LANGUAGES.items():
+            self.language_combo.addItem(name, code)
+        appearance_form.addRow(tr("Język"), self.language_combo)
+        self.theme_combo = QComboBox()
+        for key, theme in THEMES.items():
+            self.theme_combo.addItem(theme.name, key)
+        appearance_form.addRow(tr("Motyw"), self.theme_combo)
+        self.console_monitor_combo = QComboBox()
+        appearance_form.addRow(tr("Monitor konsoli"), self.console_monitor_combo)
+        appearance_layout.addLayout(appearance_form)
+        theme_preview = QLabel(
+            tr("Zmiana motywu działa od razu. Kolory MangoHud pozostają osobnym "
+            "profilem nakładki.")
+        )
+        theme_preview.setObjectName("Muted")
+        theme_preview.setWordWrap(True)
+        appearance_layout.addWidget(theme_preview)
+        self.theme_combo.currentIndexChanged.connect(self._theme_selected)
+        self.language_combo.currentIndexChanged.connect(self._language_selected)
+        body.addWidget(appearance)
+
+        runtime, runtime_layout = self._panel(
+            tr("RUNTIME"), tr("Domyślny silnik i dostępne integracje.")
+        )
+        form = QFormLayout()
+        form.setSpacing(11)
+        self.runner_combo = QComboBox()
+        form.addRow(tr("Domyślny runner"), self.runner_combo)
+        runtime_layout.addLayout(form)
+        checks = QGridLayout()
+        checks.setHorizontalSpacing(28)
+        checks.setVerticalSpacing(10)
+        self.gamemode_cb = QCheckBox(tr("Feral GameMode (gamemoderun)"))
+        self.mangohud_cb = QCheckBox(tr("MangoHud overlay"))
+        self.gamescope_cb = QCheckBox(tr("Gamescope / skalowanie"))
+        self.debug_cb = QCheckBox(tr("Debug: zapis do last_run.log"))
+        self.ghost_cb = QCheckBox(tr("Minimalizuj Boostlayer po starcie gry"))
+        self.tray_cb = QCheckBox(tr("Zamykanie okna do tray"))
+        self.hotkey_cb = QCheckBox(tr("Globalny skrót Ctrl+Alt+S (pokaż/ukryj)"))
+        checks.addWidget(self.gamemode_cb, 0, 0)
+        checks.addWidget(self.mangohud_cb, 0, 1)
+        checks.addWidget(self.gamescope_cb, 1, 0)
+        checks.addWidget(self.debug_cb, 1, 1)
+        checks.addWidget(self.ghost_cb, 2, 0)
+        checks.addWidget(self.tray_cb, 2, 1)
+        checks.addWidget(self.hotkey_cb, 3, 0)
+        runtime_layout.addLayout(checks)
+        hint = QLabel(
+            tr("Po starcie gry Boostlayer minimalizuje się do paska zadań i "
+            "pozostaje w pamięci. Gra standalone jest nadzorowana przez "
+            "QProcess; po jej zakończeniu okno wraca. Steam nie daje "
+            "niezawodnego sygnału końca gry, więc wracasz przez tray lub "
+            "Ctrl+Alt+S."))
+
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        runtime_layout.addWidget(hint)
+        body.addWidget(runtime)
+
+        steam_panel, steam_layout = self._panel(
+            tr("STEAM"), tr("Import appmanifest_*.acf i okładek z lokalnego cache/CDN.")
+        )
+        steam_row = QWidget()
+        steam_row_layout = QHBoxLayout(steam_row)
+        steam_row_layout.setContentsMargins(0, 0, 0, 0)
+        steam_row_layout.setSpacing(6)
+        self.steam_edit = QLineEdit()
+        self.steam_edit.setPlaceholderText(
+            tr("Automatyczne wykrywanie: ~/.steam/steam, ~/.local/share/Steam, Flatpak"))
+
+        steam_row_layout.addWidget(self.steam_edit, 1)
+        browse = QPushButton("...")
+        browse.setObjectName("GhostButton")
+        browse.setFixedWidth(42)
+        browse.clicked.connect(self._browse_steam)
+        steam_row_layout.addWidget(browse)
+        steam_layout.addWidget(steam_row)
+        steam_actions = QHBoxLayout()
+        sync_button = QPushButton(tr("↻  SYNCHRONIZUJ STEAM"))
+        sync_button.setObjectName("GhostButton")
+        sync_button.clicked.connect(self.steam_sync_requested.emit)
+        steam_actions.addWidget(sync_button)
+        steam_actions.addStretch(1)
+        steam_layout.addLayout(steam_actions)
+        body.addWidget(steam_panel)
+
+        wrapper_panel, wrapper_layout = self._panel(
+            tr("STEAM WRAPPER"),
+            tr("Nakłada MangoHud, Gamescope, GameMode i limit FPS również na gry "
+            "uruchamiane z klienta Steam."),
+        )
+        self.wrapper_status = QLabel("")
+        self.wrapper_status.setObjectName("Muted")
+        self.wrapper_status.setWordWrap(True)
+        self.wrapper_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        wrapper_layout.addWidget(self.wrapper_status)
+        self.auto_wrapper_cb = QCheckBox(
+            tr("Automatycznie dopisuj wrapper przy pierwszym starcie gry Steam"))
+
+        wrapper_layout.addWidget(self.auto_wrapper_cb)
+        wrapper_actions = QHBoxLayout()
+        install_wrapper = QPushButton(tr("ZAINSTALUJ / ODŚWIEŻ WRAPPER"))
+        install_wrapper.setObjectName("GhostButton")
+        install_wrapper.clicked.connect(self._install_wrapper)
+        wrapper_actions.addWidget(install_wrapper)
+        copy_wrapper = QPushButton(tr("KOPIUJ OPCJĘ URUCHAMIANIA"))
+        copy_wrapper.setObjectName("GhostButton")
+        copy_wrapper.clicked.connect(self._copy_wrapper_option)
+        wrapper_actions.addWidget(copy_wrapper)
+        wrapper_actions.addStretch(1)
+        wrapper_layout.addLayout(wrapper_actions)
+        wrapper_batch = QHBoxLayout()
+        apply_all = QPushButton(tr("ZASTOSUJ DO WSZYSTKICH GIER STEAM"))
+        apply_all.setObjectName("PrimaryButton")
+        apply_all.clicked.connect(self.steam_wrapper_batch_requested.emit)
+        wrapper_batch.addWidget(apply_all)
+        restore = QPushButton(tr("PRZYWRÓĆ OSTATNI BACKUP"))
+        restore.setObjectName("GhostButton")
+        restore.clicked.connect(self.steam_restore_requested.emit)
+        wrapper_batch.addWidget(restore)
+        wrapper_batch.addStretch(1)
+        wrapper_layout.addLayout(wrapper_batch)
+        wrapper_hint = QLabel(
+            tr("Wpis zawiera %command%, więc Steam nadal uruchamia swojego Protona. "
+            "Aby zapisać LaunchOptions, Steam musi być zamknięty; aplikacja "
+            "zapyta przed zamknięciem i zrobi backup localconfig.vdf.")
+)
+        wrapper_hint.setObjectName("Muted")
+        wrapper_hint.setWordWrap(True)
+        wrapper_layout.addWidget(wrapper_hint)
+        body.addWidget(wrapper_panel)
+
+        deps_panel, deps_layout = self._panel(
+            tr("ZALEŻNOŚCI"),
+            tr("MangoHud i GameMode są instalowane przez pakiet .deb. "
+            "W AppImage użyj przycisku instalacji (pkexec)."),
+        )
+        self.deps_label = QLabel()
+        self.deps_label.setTextFormat(Qt.TextFormat.RichText)
+        self.deps_label.setWordWrap(True)
+        deps_layout.addWidget(self.deps_label)
+        deps_actions = QHBoxLayout()
+        refresh_deps = QPushButton(tr("ODŚWIEŻ STATUS"))
+        refresh_deps.setObjectName("GhostButton")
+        refresh_deps.clicked.connect(self._refresh_deps)
+        deps_actions.addWidget(refresh_deps)
+        self.install_deps_button = QPushButton(tr("ZAINSTALUJ BRAKUJĄCE"))
+        self.install_deps_button.setObjectName("PrimaryButton")
+        self.install_deps_button.clicked.connect(self._install_dependencies)
+        deps_actions.addWidget(self.install_deps_button)
+        self.install_m32_button = QPushButton(tr("MANGOHUD 32-BIT"))
+        self.install_m32_button.setObjectName("GhostButton")
+        self.install_m32_button.clicked.connect(self._install_mangohud32)
+        deps_actions.addWidget(self.install_m32_button)
+        self.gamepad_udev_button = QPushButton(tr("WŁĄCZ OBSŁUGĘ PADA"))
+        self.gamepad_udev_button.setObjectName("GhostButton")
+        self.gamepad_udev_button.clicked.connect(self._install_gamepad_udev)
+        deps_actions.addWidget(self.gamepad_udev_button)
+        deps_actions.addStretch(1)
+        deps_layout.addLayout(deps_actions)
+        self.deps_output = QLabel("")
+        self.deps_output.setObjectName("Muted")
+        self.deps_output.setWordWrap(True)
+        self.deps_output.setTextFormat(Qt.TextFormat.PlainText)
+        deps_layout.addWidget(self.deps_output)
+        body.addWidget(deps_panel)
+
+        maint_panel, maint_layout = self._panel(
+            tr("KONSERWACJA"), tr("Logi, konfiguracja i cache shaderów.")
+        )
+        self.config_label = QLabel(str(config_dir()))
+        self.config_label.setObjectName("Muted")
+        self.config_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        maint_layout.addWidget(self.config_label)
+        maint_buttons = QHBoxLayout()
+        for text, slot, style in (
+            (tr("POKAŻ LAST_RUN.LOG"), self.open_log, "GhostButton"),
+            (tr("OTWÓRZ KONFIGURACJĘ"), self.open_config, "GhostButton"),
+            (tr("WYCZYŚĆ SHADER CACHE"), self.clear_cache_requested.emit, "DangerButton"),
+        ):
+            button = QPushButton(text)
+            button.setObjectName(style)
+            button.clicked.connect(slot)
+            maint_buttons.addWidget(button)
+        maint_buttons.addStretch(1)
+        maint_layout.addLayout(maint_buttons)
+        body.addWidget(maint_panel)
+        body.addStretch(1)
+        scroll.setWidget(host)
+        outer.addWidget(scroll, 1)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Muted")
+        footer.addWidget(self.status_label)
+        footer.addStretch(1)
+        save = QPushButton(tr("ZAPISZ USTAWIENIA"))
+        save.setObjectName("PrimaryButton")
+        save.clicked.connect(self.save)
+        footer.addWidget(save)
+        outer.addLayout(footer)
+        self.reload()
+
+    def _panel(self, title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setObjectName("SectionTitle")
+        layout.addWidget(title_label)
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setObjectName("Muted")
+            sub.setWordWrap(True)
+            layout.addWidget(sub)
+        return frame, layout
+
+    def reload(self) -> None:
+        language_key = self.db.get_setting("language", DEFAULT_LANGUAGE)
+        language_index = self.language_combo.findData(language_key)
+        self.language_combo.blockSignals(True)
+        self.language_combo.setCurrentIndex(max(0, language_index))
+        self.language_combo.blockSignals(False)
+        theme_key = self.db.get_setting("theme", DEFAULT_THEME)
+        index = self.theme_combo.findData(theme_key)
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.setCurrentIndex(max(0, index))
+        self.theme_combo.blockSignals(False)
+        self._refresh_console_monitors()
+        self.gamemode_cb.setChecked(self.db.get_bool("gamemode", True))
+        self.mangohud_cb.setChecked(self.db.get_bool("mangohud", True))
+        self.gamescope_cb.setChecked(self.db.get_bool("gamescope", True))
+        self.debug_cb.setChecked(self.db.get_bool("debug_logging", False))
+        self.ghost_cb.setChecked(self.db.get_bool("ghost_mode", True))
+        self.tray_cb.setChecked(self.db.get_bool("close_to_tray", True))
+        self.hotkey_cb.setChecked(self.db.get_bool("global_hotkey", True))
+        self.auto_wrapper_cb.setChecked(
+            self.db.get_bool("auto_steam_wrapper", True)
+        )
+        self.steam_edit.setText(self.db.get_setting("steam_path"))
+        self._refresh_wrapper_status()
+        self.refresh_runners()
+        self._refresh_deps()
+
+    def refresh_runners(self) -> None:
+        selected = self.db.get_setting("default_runner")
+        self.runner_combo.blockSignals(True)
+        self.runner_combo.clear()
+        self.runner_combo.addItem(tr("Automatycznie (pierwszy dostępny)"), "")
+        for runner in discover_runners():
+            self.runner_combo.addItem(runner.label, runner.path)
+        index = self.runner_combo.findData(selected)
+        if index < 0 and selected:
+            self.runner_combo.addItem(tr("Własny: {name}", name=selected), selected)
+            index = self.runner_combo.count() - 1
+        self.runner_combo.setCurrentIndex(max(0, index))
+        self.runner_combo.blockSignals(False)
+
+    def save(self) -> None:
+        self.db.set_many(
+            {
+                "default_runner": str(self.runner_combo.currentData() or ""),
+                "gamemode": "1" if self.gamemode_cb.isChecked() else "0",
+                "mangohud": "1" if self.mangohud_cb.isChecked() else "0",
+                "gamescope": "1" if self.gamescope_cb.isChecked() else "0",
+                "debug_logging": "1" if self.debug_cb.isChecked() else "0",
+                "ghost_mode": "1" if self.ghost_cb.isChecked() else "0",
+                "close_to_tray": "1" if self.tray_cb.isChecked() else "0",
+                "global_hotkey": "1" if self.hotkey_cb.isChecked() else "0",
+                "auto_steam_wrapper": "1" if self.auto_wrapper_cb.isChecked() else "0",
+                "theme": str(self.theme_combo.currentData() or DEFAULT_THEME),
+                "language": str(self.language_combo.currentData() or DEFAULT_LANGUAGE),
+                "console_monitor": str(self.console_monitor_combo.currentData() or "0"),
+                "steam_path": self.steam_edit.text().strip(),
+            }
+        )
+        self.status_label.setText(tr("Zapisano."))
+        QTimer.singleShot(2200, lambda: self.status_label.setText(""))
+        self.toast.emit(tr("Ustawienia globalne zapisane."))
+        self.settings_changed.emit()
+
+    def _theme_selected(self) -> None:
+        key = str(self.theme_combo.currentData() or DEFAULT_THEME)
+        self.db.set_setting("theme", key)
+        self.theme_changed.emit(key)
+        self.toast.emit(tr("Motyw: {name}", name=THEMES.get(key, get_theme()).name))
+
+    def _language_selected(self) -> None:
+        code = str(self.language_combo.currentData() or DEFAULT_LANGUAGE)
+        if code == get_language():
+            return
+        self.db.set_setting("language", code)
+        self.language_changed.emit(code)
+
+    def _refresh_console_monitors(self) -> None:
+        selected = self.db.get_setting("console_monitor", "0")
+        self.console_monitor_combo.blockSignals(True)
+        self.console_monitor_combo.clear()
+        screens = QGuiApplication.screens()
+        if not screens:
+            self.console_monitor_combo.addItem(tr("Monitor główny"), "0")
+        else:
+            for index, screen in enumerate(screens):
+                geometry = screen.geometry()
+                self.console_monitor_combo.addItem(
+                    tr(
+                        "Monitor {number} — {width}x{height}",
+                        number=index + 1,
+                        width=geometry.width(),
+                        height=geometry.height(),
+                    ),
+                    str(index),
+                )
+        idx = self.console_monitor_combo.findData(selected)
+        self.console_monitor_combo.setCurrentIndex(max(0, idx))
+        self.console_monitor_combo.blockSignals(False)
+
+    def _browse_steam(self) -> None:
+        initial = self.steam_edit.text().strip() or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, tr("Katalog Steam"), initial)
+        if folder:
+            self.steam_edit.setText(folder)
+
+    def _refresh_wrapper_status(self) -> None:
+        path = steam_wrapper_path()
+        if path.is_file():
+            self.wrapper_status.setText(f"Wrapper: {path}")
+        else:
+            self.wrapper_status.setText(
+                tr("Wrapper nie jest jeszcze zainstalowany. Instalacja jest lokalna; "
+                "automatyczny wpis LaunchOptions wymaga zamknięcia Steama.")
+)
+
+    def _install_wrapper(self) -> None:
         try:
-            d.ungrab_pointer(X.CurrentTime)
-        except Exception:
+            path = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        self.db.set_setting("steam_wrapper", str(path))
+        self._refresh_wrapper_status()
+        QApplication.clipboard().setText(steam_launch_option(path))
+        self.toast.emit(tr("Wrapper Steam zainstalowany; opcja skopiowana do schowka."))
+        self.status_label.setText(tr("Wrapper gotowy. Wklej opcję w Steam."))
+
+    def _copy_wrapper_option(self) -> None:
+        try:
+            path = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        self.db.set_setting("steam_wrapper", str(path))
+        self._refresh_wrapper_status()
+        QApplication.clipboard().setText(steam_launch_option(path))
+        self.toast.emit(tr("Opcja uruchamiania Steam skopiowana do schowka."))
+        self.status_label.setText(tr("Skopiowano. Wklej w opcjach uruchamiania Steam."))
+
+    def _refresh_deps(self) -> None:
+        rows = []
+        for tool in tool_status():
+            if tool.installed:
+                rows.append(
+                    f"<span style='color:#42F5A7'>●</span> "
+                    f"<b>{html.escape(tool.label)}</b> "
+                    f"<span style='color:#69808B'>{html.escape(tool.path)}</span>"
+                )
+            else:
+                rows.append(
+                    f"<span style='color:#FFB347'>○</span> "
+                    f"<b>{html.escape(tool.label)}</b> "
+                    f"<span style='color:#69808B'>"
+                    f"{tr('brak w PATH (pakiet: {package})', package=tool.package)}"
+                    "</span>"
+                )
+        m32 = mangohud32_path()
+        rows.append(
+            f"<span style='color:{'#42F5A7' if m32 else '#FFB347'}'>●</span> "
+            f"<b>MangoHud 32-bit</b> "
+            f"<span style='color:#69808B'>"
+            f"{html.escape(m32) if m32 else tr('brak — wymagany dla gier PE32')}"
+            "</span>"
+        )
+        rows.append(
+            f"<span style='color:#69808B'>"
+            f"{tr('Menedżer pakietów: {manager}', manager=package_manager() or tr('nie wykryto'))}"
+            "</span>"
+        )
+        self.deps_label.setText("<br>".join(rows))
+        has_gamescope = bool(shutil.which("gamescope"))
+        self.gamescope_cb.setEnabled(has_gamescope)
+        self.gamescope_cb.setText(
+            tr("Gamescope / skalowanie")
+            if has_gamescope
+            else tr("Gamescope / skalowanie (niedostępny)")
+        )
+        missing = missing_installable_tools()
+        install_groups = dependency_install_groups()
+        needs_install = bool(missing) or bool(install_groups)
+        self.install_deps_button.setEnabled(needs_install)
+        self.install_deps_button.setText(
+            tr("ZAINSTALUJ BRAKUJĄCE") if needs_install else tr("NARZĘDZIA OK")
+        )
+        has_m32 = bool(mangohud32_path())
+        self.install_m32_button.setText(
+            tr("MANGOHUD 32-BIT: OK") if has_m32 else tr("ZAINSTALUJ MANGOHUD 32-BIT")
+        )
+        self.install_m32_button.setEnabled(
+            not has_m32 and self._m32_process is None
+        )
+
+    def _install_dependencies(self) -> None:
+        if self._dep_process is not None:
+            self.toast.emit(tr("Instalacja już trwa."))
+            return
+        missing = missing_installable_tools()
+        groups = dependency_install_groups()
+        if not missing and not groups:
+            QMessageBox.information(
+                self,
+                tr("Zależności"),
+                tr("MangoHud, GameMode (także 32-bit) i Gamescope są zainstalowane "
+                "lub nie mają dostępnego pakietu. Wine nie jest instalowany "
+                "automatycznie."),
+            )
+            return
+        if not groups:
+            manager = package_manager()
+            packages = " ".join(
+                dict.fromkeys(tool.package for tool in missing)
+            )
+            if manager == "pacman":
+                manual = f"sudo pacman -S --needed {packages}"
+            elif manager:
+                manual = f"sudo {manager} install -y {packages}"
+            else:
+                manual = tr("Zainstaluj ręcznie: {packages}", packages=packages)
+            QApplication.clipboard().setText(manual)
+            QMessageBox.information(
+                self,
+                tr("Brak automatycznego instalatora"),
+                tr(
+                    "Nie wykryto pkexec albo menedżera pakietów.\n\n"
+                    "Polecenie skopiowane do schowka:\n\n{command}",
+                    command=manual,
+                ),
+            )
+            return
+        details = "\n".join(
+            f"• {group.label}: {' '.join(group.packages)}" for group in groups
+        )
+        answer = QMessageBox.question(
+            self,
+            tr("Zainstalować zależności?"),
+            tr(
+                "Zostaną uruchomione polecenia menedżera pakietów z uprawnieniami "
+                "administratora (pkexec):\n\n{details}\n\nKontynuować?",
+                details=details,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._dep_queue = list(groups)
+        self._dep_failures = []
+        self.install_deps_button.setEnabled(False)
+        self._run_next_dependency()
+
+    def _install_gamepad_udev(self) -> None:
+        if self._gamepad_process is not None:
+            self.toast.emit(tr("Instalacja reguły pada już trwa."))
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Obsługa pada"),
+            tr("Dodać regułę udev, która przyzna aktywnemu użytkownikowi dostęp "
+            "do /dev/input/js*?\n\nWymagane będzie pkexec. Po instalacji "
+            "odłącz i podłącz pad ponownie."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        script = gamepad_udev_script()
+        if not script.is_file():
+            QMessageBox.warning(
+                self,
+                tr("Obsługa pada"),
+                tr("Brak instalatora:\n{path}", path=script),
+            )
+            return
+        process = QProcess(self)
+        self._gamepad_process = process
+        self.deps_output.setText(tr("Instaluję regułę udev dla pada..."))
+        process.setProgram("/bin/sh")
+        process.setArguments([str(script)])
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(self._read_gamepad_output)
+        process.finished.connect(self._gamepad_finished)
+        process.errorOccurred.connect(self._gamepad_error)
+        process.start()
+
+    def _read_gamepad_output(self) -> None:
+        process = self._gamepad_process
+        if process is None:
+            return
+        text = bytes(process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        if text.strip():
+            self.deps_output.setText((self.deps_output.text() + "\n" + text)[-1800:])
+
+    def _gamepad_finished(self, code: int, _status: QProcess.ExitStatus) -> None:
+        process = self._gamepad_process
+        if process is None:
+            return
+        process.deleteLater()
+        self._gamepad_process = None
+        if code == 0:
+            QMessageBox.information(
+                self,
+                tr("Obsługa pada"),
+                tr("Reguła udev zainstalowana. Odłącz i podłącz pad ponownie."),
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                tr("Obsługa pada"),
+                tr("Instalacja nie powiodła się. Sprawdź log w panelu zależności."),
+            )
+
+    def _gamepad_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        process = self._gamepad_process
+        if process is not None:
+            process.deleteLater()
+        self._gamepad_process = None
+        QMessageBox.warning(
+            self, tr("Obsługa pada"), tr("Nie udało się uruchomić instalatora udev.")
+        )
+
+    def _install_mangohud32(self) -> None:
+        if self._m32_process is not None:
+            self.toast.emit(tr("Instalacja MangoHud 32-bit już trwa."))
+            return
+        if mangohud32_path():
+            QMessageBox.information(
+                self,
+                tr("MangoHud 32-bit"),
+                tr("32-bitowy MangoHud jest już zainstalowany."),
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("MangoHud 32-bit"),
+            tr("Zostanie pobrany oficjalny 32-bitowy build MangoHud i zainstalowany "
+            "w /usr/lib/i386-linux-gnu/mangohud. Wymagane będzie pkexec oraz "
+            "pakiety i386. Kontynuować?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        script = mangohud32_script()
+        if not script.is_file():
+            QMessageBox.warning(
+                self,
+                tr("MangoHud 32-bit"),
+                tr("Brak skryptu instalatora:\n{path}", path=script),
+            )
+            return
+        process = QProcess(self)
+        self._m32_process = process
+        self.install_m32_button.setEnabled(False)
+        self.deps_output.setText(tr("Instaluję MangoHud 32-bit..."))
+        process.setProgram("/bin/sh")
+        process.setArguments([str(script)])
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(self._read_m32_output)
+        process.finished.connect(self._m32_finished)
+        process.errorOccurred.connect(self._m32_error)
+        process.start()
+
+    def _read_m32_output(self) -> None:
+        process = self._m32_process
+        if process is None:
+            return
+        text = bytes(process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        if text.strip():
+            current = self.deps_output.text()
+            self.deps_output.setText((current + "\n" + text)[-2400:])
+
+    def _m32_finished(self, code: int, _status: QProcess.ExitStatus) -> None:
+        process = self._m32_process
+        if process is None:
+            return
+        process.deleteLater()
+        self._m32_process = None
+        self._refresh_deps()
+        if code == 0 and mangohud32_path():
+            self.toast.emit(tr("MangoHud 32-bit zainstalowany."))
+            QMessageBox.information(
+                self,
+                tr("MangoHud 32-bit"),
+                tr(
+                    "Zainstalowano:\n{path}\n\n"
+                    "32-bitowe gry powinny teraz dostać overlay.",
+                    path=mangohud32_path(),
+                ),
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                tr("MangoHud 32-bit"),
+                tr("Instalacja nie powiodła się. Sprawdź log w panelu zależności."),
+            )
+
+    def _m32_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        process = self._m32_process
+        if process is not None:
+            process.deleteLater()
+        self._m32_process = None
+        self._refresh_deps()
+        QMessageBox.warning(
+            self, tr("MangoHud 32-bit"), tr("Nie udało się uruchomić instalatora.")
+        )
+
+    def _run_next_dependency(self) -> None:
+        if not self._dep_queue:
+            self._dep_process = None
+            self._refresh_deps()
+            self.install_deps_button.setEnabled(
+                bool(missing_installable_tools()) or bool(dependency_install_groups())
+            )
+            if self._dep_failures:
+                QMessageBox.warning(
+                    self,
+                    tr("Zależności"),
+                    tr(
+                        "Część instalacji nie powiodła się:\n\n{failures}\n\n"
+                        "Na Ubuntu 24.04 pakiet gamescope może nie być dostępny "
+                        "w repozytorium. Pozostałe narzędzia zainstalowały się "
+                        "niezależnie.",
+                        failures="\n".join(self._dep_failures),
+                    ),
+                )
+            else:
+                self.toast.emit(tr("Zależności zostały zainstalowane."))
+            return
+        group = self._dep_queue.pop(0)
+        self.deps_output.setText(tr("Instaluję {name}...", name=group.label))
+        process = QProcess(self)
+        self._dep_process = process
+        process.setProgram(group.argv[0])
+        process.setArguments(list(group.argv[1:]))
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(self._read_dependency_output)
+        process.finished.connect(
+            lambda code, _status, current=group, proc=process: self._dependency_finished(
+                current, int(code), proc
+            )
+        )
+        process.errorOccurred.connect(
+            lambda error, proc=process: self._dependency_error(proc, error)
+        )
+        process.start()
+
+    def _read_dependency_output(self) -> None:
+        process = self._dep_process
+        if process is None:
+            return
+        text = bytes(process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        if text.strip():
+            current = self.deps_output.text()
+            self.deps_output.setText((current + "\n" + text)[-1800:])
+
+    def _dependency_finished(
+        self, group: DependencyGroup, code: int, process: QProcess
+    ) -> None:
+        if process is not self._dep_process:
+            return
+        process.deleteLater()
+        self._dep_process = None
+        if code != 0:
+            self._dep_failures.append(f"{group.label}: kod {code}")
+        QTimer.singleShot(0, self._run_next_dependency)
+
+    def _dependency_error(
+        self, process: QProcess, error: QProcess.ProcessError
+    ) -> None:
+        if process is not self._dep_process:
+            return
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        process.deleteLater()
+        self._dep_process = None
+        self._dep_failures.append(tr("Nie udało się uruchomić pkexec."))
+        QTimer.singleShot(0, self._run_next_dependency)
+
+    def open_log(self) -> None:
+        if not LAST_RUN_LOG.is_file():
+            QMessageBox.information(
+                self,
+                tr("Brak logu"),
+                tr(
+                    "Plik {path} nie istnieje.\n"
+                    "Włącz opcję debugowania i uruchom grę.",
+                    path=LAST_RUN_LOG,
+                ),
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(LAST_RUN_LOG)))
+
+    def open_config(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_dir())))
+
+    def set_busy(self, busy: bool) -> None:
+        # Kept for symmetry with the library toolbar.
+        self.steam_edit.setEnabled(not busy)
+
+
+class RunnerPage(QWidget):
+    toast = pyqtSignal(str)
+    runners_changed = pyqtSignal()
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        self._worker: RunnerDownloadWorker | None = None
+        self._versions_worker: RunnerReleasesWorker | None = None
+        self._versions_key = ""
+        self._releases: list[dict[str, Any]] = []
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 24, 28, 20)
+        outer.setSpacing(14)
+        kicker = QLabel(tr("RUNTIME // GITHUB"))
+        kicker.setObjectName("PageKicker")
+        outer.addWidget(kicker)
+        heading = QLabel(tr("Menedżer runnerów"))
+        heading.setObjectName("PageTitle")
+        outer.addWidget(heading)
+        subtitle = QLabel(
+            tr("Pobieranie Proton-GE i Wine-GE bez API wrapperów: urllib + json + "
+            "tarfile. Każdy runner ląduje w izolowanym katalogu.")
+ )
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        outer.addWidget(subtitle)
+
+        download_panel = QFrame()
+        download_panel.setObjectName("Panel")
+        download_layout = QVBoxLayout(download_panel)
+        download_layout.setContentsMargins(18, 16, 18, 16)
+        download_layout.setSpacing(10)
+        title = QLabel(tr("POBIERZ NAJNOWSZY"))
+        title.setObjectName("SectionTitle")
+        download_layout.addWidget(title)
+        source_row = QHBoxLayout()
+        self.source_combo = QComboBox()
+        self.source_combo.addItem(tr("Proton-GE  //  GloriousEggroll/proton-ge-custom"), "proton_ge")
+        self.source_combo.addItem(tr("Wine-GE  //  GloriousEggroll/wine-ge-custom"), "wine_ge")
+        self.source_combo.currentIndexChanged.connect(self._reset_versions)
+        source_row.addWidget(self.source_combo, 1)
+        self.versions_button = QPushButton(tr("POKAŻ / ODŚWIEŻ WERSJE"))
+        self.versions_button.setObjectName("GhostButton")
+        self.versions_button.clicked.connect(self._load_releases)
+        source_row.addWidget(self.versions_button)
+        self.download_button = QPushButton(tr("POBIERZ WYBRANĄ"))
+        self.download_button.setObjectName("PrimaryButton")
+        self.download_button.clicked.connect(self._download)
+        source_row.addWidget(self.download_button)
+        download_layout.addLayout(source_row)
+        version_row = QHBoxLayout()
+        version_label = QLabel(tr("WERSJA"))
+        version_label.setObjectName("Muted")
+        version_row.addWidget(version_label)
+        self.version_combo = QComboBox()
+        self.version_combo.addItem(tr("Najnowszy (automatycznie)"), None)
+        self.version_combo.setEnabled(False)
+        version_row.addWidget(self.version_combo, 1)
+        download_layout.addLayout(version_row)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setVisible(False)
+        download_layout.addWidget(self.progress)
+        self.download_status = QLabel(
+            tr("Źródło: oficjalne GitHub Releases. Archiwa są weryfikowane pod kątem "
+            "path traversal przed rozpakowaniem.")
+        )
+        self.download_status.setObjectName("Muted")
+        self.download_status.setWordWrap(True)
+        download_layout.addWidget(self.download_status)
+        outer.addWidget(download_panel)
+
+        installed_panel = QFrame()
+        installed_panel.setObjectName("Panel")
+        installed_layout = QVBoxLayout(installed_panel)
+        installed_layout.setContentsMargins(18, 16, 18, 16)
+        installed_layout.setSpacing(10)
+        installed_head = QHBoxLayout()
+        installed_title = QLabel(tr("ZAINSTALOWANE SILNIKI"))
+        installed_title.setObjectName("SectionTitle")
+        installed_head.addWidget(installed_title)
+        installed_head.addStretch(1)
+        refresh = QPushButton(tr("ODŚWIEŻ"))
+        refresh.setObjectName("GhostButton")
+        refresh.clicked.connect(self.refresh)
+        installed_head.addWidget(refresh)
+        open_dir = QPushButton(tr("OTWÓRZ KATALOG"))
+        open_dir.setObjectName("GhostButton")
+        open_dir.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(db.RUNNERS_DIR)))
+        )
+        installed_head.addWidget(open_dir)
+        installed_layout.addLayout(installed_head)
+        self.table = QTreeWidget()
+        self.table.setHeaderLabels([tr("Silnik"), tr("Typ"), tr("Plik wine")])
+        self.table.setRootIsDecorated(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setMinimumHeight(250)
+        self.table.header().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 300)
+        self.table.setColumnWidth(1, 90)
+        self.table.doubleClicked.connect(lambda _index: self._open_selected())
+        installed_layout.addWidget(self.table, 1)
+        actions = QHBoxLayout()
+        self.delete_button = QPushButton(tr("USUŃ WYBRANY"))
+        self.delete_button.setObjectName("DangerButton")
+        self.delete_button.clicked.connect(self._delete_selected)
+        actions.addWidget(self.delete_button)
+        actions.addStretch(1)
+        self.location_label = QLabel(tr("Lokalizacja: {path}", path=db.RUNNERS_DIR))
+        self.location_label.setObjectName("Muted")
+        actions.addWidget(self.location_label)
+        installed_layout.addLayout(actions)
+        outer.addWidget(installed_panel, 1)
+
+        default_panel = QFrame()
+        default_panel.setObjectName("Panel")
+        default_layout = QHBoxLayout(default_panel)
+        default_layout.setContentsMargins(18, 14, 18, 14)
+        default_label = QLabel(tr("DOMYŚLNY RUNNER DLA NOWYCH GIER"))
+        default_label.setObjectName("SectionTitle")
+        default_layout.addWidget(default_label)
+        self.default_combo = QComboBox()
+        default_layout.addWidget(self.default_combo, 1)
+        use_button = QPushButton(tr("USTAW JAKO DOMYŚLNY"))
+        use_button.setObjectName("GhostButton")
+        use_button.clicked.connect(self._set_default)
+        default_layout.addWidget(use_button)
+        outer.addWidget(default_panel)
+        self.refresh()
+
+    def _refresh_combo(self) -> None:
+        selected = self.db.get_setting("default_runner")
+        self.default_combo.blockSignals(True)
+        self.default_combo.clear()
+        self.default_combo.addItem(tr("Automatycznie (pierwszy dostępny)"), "")
+        for runner in discover_runners():
+            self.default_combo.addItem(runner.label, runner.path)
+        index = self.default_combo.findData(selected)
+        if index < 0 and selected:
+            self.default_combo.addItem(tr("Własny: {name}", name=selected), selected)
+            index = self.default_combo.count() - 1
+        self.default_combo.setCurrentIndex(max(0, index))
+        self.default_combo.blockSignals(False)
+
+    def refresh(self) -> None:
+        self.table.clear()
+        for runner in discover_runners():
+            item = QTreeWidgetItem([runner.version, runner.kind.upper(), runner.path])
+            item.setData(2, Qt.ItemDataRole.UserRole, runner.path)
+            item.setData(1, Qt.ItemDataRole.UserRole, runner.kind)
+            self.table.addTopLevelItem(item)
+        self._refresh_combo()
+        self.runners_changed.emit()
+
+    def _reset_versions(self) -> None:
+        self._versions_key = str(self.source_combo.currentData() or "proton_ge")
+        self._releases = []
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        self.version_combo.addItem(tr("Najnowszy (automatycznie)"), None)
+        self.version_combo.setEnabled(False)
+        self.version_combo.blockSignals(False)
+
+    def _load_releases(self) -> None:
+        if self._versions_worker is not None:
+            return
+        key = str(self.source_combo.currentData() or "proton_ge")
+        self._versions_key = key
+        self.versions_button.setEnabled(False)
+        self.download_status.setText(tr("Pobieram listę wersji z GitHub Releases..."))
+        worker = RunnerReleasesWorker(key, force=True, parent=self)
+        self._versions_worker = worker
+        worker.result.connect(self._releases_result)
+        worker.finished.connect(self._versions_finished)
+        worker.start()
+
+    def _releases_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            self.download_status.setText(
+                tr(
+                    "Nie udało się pobrać listy wersji: {error}",
+                    error=data.get("error", tr("nieznany błąd")),
+                )
+            )
+            return
+        if self._versions_key != str(self.source_combo.currentData() or "proton_ge"):
+            return
+        releases = data.get("releases") or []
+        self._releases = [item for item in releases if isinstance(item, dict)]
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        self.version_combo.addItem(tr("Najnowszy (automatycznie)"), None)
+        for release in self._releases:
+            tag = str(release.get("tag_name", "?"))
+            date = str(release.get("published_at", ""))[:10]
+            asset = choose_runner_asset(release.get("assets") or [])
+            size = ""
+            if asset:
+                try:
+                    size = human_bytes(int(asset.get("size", 0)))
+                except (TypeError, ValueError):
+                    size = ""
+            badge = "  [BETA]" if release.get("prerelease") else ""
+            label = f"{tag}{badge}"
+            if date:
+                label += f"  •  {date}"
+            if size:
+                label += f"  •  {size}"
+            self.version_combo.addItem(label, release)
+        self.version_combo.setCurrentIndex(0)
+        self.version_combo.setEnabled(bool(self._releases))
+        self.version_combo.blockSignals(False)
+        self.download_status.setText(
+            tr(
+                "Znaleziono {count} wersji. Wybierz wersję i pobierz.",
+                count=len(self._releases),
+            )
+        )
+
+    def _versions_finished(self) -> None:
+        worker = self._versions_worker
+        self._versions_worker = None
+        self.versions_button.setEnabled(True)
+        if worker is not None:
+            worker.deleteLater()
+
+    def _download(self) -> None:
+        if self._worker is not None:
+            return
+        key = str(self.source_combo.currentData() or "proton_ge")
+        release = self.version_combo.currentData()
+        self.download_button.setEnabled(False)
+        self.source_combo.setEnabled(False)
+        self.versions_button.setEnabled(False)
+        self.version_combo.setEnabled(False)
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
+        worker = RunnerDownloadWorker(
+            key,
+            release if isinstance(release, dict) else None,
+            self,
+        )
+        self._worker = worker
+        worker.status.connect(self.download_status.setText)
+        worker.progress.connect(self.progress.setValue)
+        worker.result.connect(self._download_finished)
+        worker.finished.connect(self._worker_finished)
+        worker.start()
+
+    def _download_finished(self, success: bool, message: str) -> None:
+        self.download_status.setText(message)
+        self.toast.emit(message)
+        if success:
+            self.progress.setValue(100)
+            self.refresh()
+        else:
+            QMessageBox.warning(self, tr("Runner"), message)
+
+    def _worker_finished(self) -> None:
+        self.download_button.setEnabled(True)
+        self.source_combo.setEnabled(True)
+        self.versions_button.setEnabled(True)
+        self.version_combo.setEnabled(bool(self._releases))
+        self.progress.setVisible(False)
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def _selected_path(self) -> str:
+        item = self.table.currentItem()
+        return str(item.data(2, Qt.ItemDataRole.UserRole)) if item else ""
+
+    def _open_selected(self) -> None:
+        path = self._selected_path()
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+    def _delete_selected(self) -> None:
+        path = self._selected_path()
+        if not path:
+            return
+        try:
+            relative = Path(path).resolve().relative_to(db.RUNNERS_DIR.resolve())
+        except ValueError:
+            QMessageBox.warning(self, tr("Runner"), tr("Systemowego runnera nie można usunąć."))
+            return
+        root = db.RUNNERS_DIR / relative.parts[0]
+        answer = QMessageBox.question(
+            self,
+            tr("Usuń runner"),
+            tr(
+                "Usunąć katalog\n{path}\n\nTej operacji nie można cofnąć.",
+                path=root,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            shutil.rmtree(root)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Runner"), tr("Nie udało się usunąć: {error}", error=exc))
+            return
+        self.toast.emit(tr("Usunięto runner {name}.", name=root.name))
+        self.refresh()
+
+    def _set_default(self) -> None:
+        path = str(self.default_combo.currentData() or "")
+        self.db.set_setting("default_runner", path)
+        self.toast.emit(tr("Domyślny runner zaktualizowany."))
+        self.runners_changed.emit()
+
+
+class MangoPage(QWidget):
+    toast = pyqtSignal(str)
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 24, 28, 20)
+        outer.setSpacing(12)
+        kicker = QLabel(tr("OVERLAY // MANGOHUD"))
+        kicker.setObjectName("PageKicker")
+        outer.addWidget(kicker)
+        heading = QLabel(tr("Kreator nakładki"))
+        heading.setObjectName("PageTitle")
+        outer.addWidget(heading)
+        subtitle = QLabel(
+            tr("Wizualny edytor modułów, pozycji i kolorów. Wartości są zapisywane "
+            "w tabeli settings, a MANGOHUD_CONFIG jest budowany przy każdym starcie "
+            "z aktualnym profilem skalowania gry."))
+
+        subtitle.setObjectName("PageSubtitle")
+        subtitle.setWordWrap(True)
+        outer.addWidget(subtitle)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(14)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        style_scroll_area(left_scroll)
+        left_scroll.setMinimumWidth(330)
+        left_scroll.setMaximumWidth(405)
+        left_host = QWidget()
+        left = QVBoxLayout(left_host)
+        left.setContentsMargins(0, 0, 8, 0)
+        left.setSpacing(12)
+
+        modules_panel, modules_layout = self._panel(tr("MODUŁY"), tr("Wybierz elementy HUD."))
+        self.module_checks: dict[str, QCheckBox] = {}
+        for key, label in (
+            ("show_fps", tr("FPS i frame time")),
+            ("show_cpu", tr("CPU load / clock")),
+            ("show_gpu", tr("GPU load / clock")),
+            ("show_ram", tr("RAM")),
+            ("show_vram", tr("VRAM")),
+            ("show_temps", tr("Temperatury CPU/GPU")),
+            ("show_frametime", tr("Wykres Frame Timing")),
+        ):
+            checkbox = QCheckBox(label)
+            self.module_checks[key] = checkbox
+            modules_layout.addWidget(checkbox)
+        left.addWidget(modules_panel)
+
+        layout_panel, layout_layout = self._panel(tr("POZYCJA"), tr("Zakotwiczenie panelu na ekranie."))
+        self.position_combo = QComboBox()
+        for label, value in (
+            (tr("Lewy górny"), "top-left"),
+            (tr("Górny środek"), "top-center"),
+            (tr("Prawy górny"), "top-right"),
+            (tr("Lewy środek"), "middle-left"),
+            (tr("Środek"), "middle-center"),
+            (tr("Prawy środek"), "middle-right"),
+            (tr("Lewy dolny"), "bottom-left"),
+            (tr("Dolny środek"), "bottom-center"),
+            (tr("Prawy dolny"), "bottom-right"),
+        ):
+            self.position_combo.addItem(label, value)
+        layout_layout.addWidget(self.position_combo)
+        self.font_spin = QSpinBox()
+        self.font_spin.setRange(10, 48)
+        self.font_spin.setSuffix(" px")
+        layout_layout.addWidget(self._labeled_row(tr("Rozmiar fontu"), self.font_spin))
+        self.alpha_spin = QDoubleSpinBox()
+        self.alpha_spin.setRange(0.0, 1.0)
+        self.alpha_spin.setSingleStep(0.05)
+        self.alpha_spin.setDecimals(2)
+        layout_layout.addWidget(self._labeled_row(tr("Tło (alpha)"), self.alpha_spin))
+        self.corners_spin = QSpinBox()
+        self.corners_spin.setRange(0, 30)
+        self.corners_spin.setSuffix(" px")
+        layout_layout.addWidget(self._labeled_row(tr("Zaokrąglenie"), self.corners_spin))
+        left.addWidget(layout_panel)
+
+        colors_panel, colors_layout = self._panel(tr("KOLORY"), tr("Akcent i paleta HUD."))
+        self.accent_button = ColorButton("#00E5FF", tr("Akcent"))
+        self.text_button = ColorButton("#E6FAFF", tr("Tekst"))
+        self.gpu_button = ColorButton("#42F5A7", tr("GPU"))
+        self.cpu_button = ColorButton("#00B8FF", tr("CPU"))
+        colors_grid = QGridLayout()
+        colors_grid.setSpacing(8)
+        colors_grid.addWidget(QLabel(tr("Akcent")), 0, 0)
+        colors_grid.addWidget(self.accent_button, 0, 1)
+        colors_grid.addWidget(QLabel(tr("Tekst")), 0, 2)
+        colors_grid.addWidget(self.text_button, 0, 3)
+        colors_grid.addWidget(QLabel(tr("GPU")), 1, 0)
+        colors_grid.addWidget(self.gpu_button, 1, 1)
+        colors_grid.addWidget(QLabel(tr("CPU")), 1, 2)
+        colors_grid.addWidget(self.cpu_button, 1, 3)
+        colors_layout.addLayout(colors_grid)
+        left.addWidget(colors_panel)
+
+        save_row = QHBoxLayout()
+        reset = QPushButton(tr("RESET"))
+        reset.setObjectName("GhostButton")
+        reset.clicked.connect(self.reset)
+        save_row.addWidget(reset)
+        save = QPushButton(tr("ZAPISZ NAKŁADKĘ"))
+        save.setObjectName("PrimaryButton")
+        save.clicked.connect(self.save)
+        save_row.addWidget(save, 1)
+        left.addLayout(save_row)
+        left.addStretch(1)
+        left_scroll.setWidget(left_host)
+        columns.addWidget(left_scroll)
+
+        right_panel, right = self._panel(
+            tr("PODGLĄD NA ŻYWO"),
+            tr("Przybliżony render; końcowy HUD rysuje MangoHud."),
+        )
+        self.preview = OverlayPreview()
+        self.preview.setMinimumHeight(300)
+        right.addWidget(self.preview, 1)
+        scaling_note = QLabel(
+            tr("custom_text: w runtime zawsze zawiera profil skalowania wybranej gry.")
+        )
+        scaling_note.setObjectName("Muted")
+        right.addWidget(scaling_note)
+        config_title = QLabel(tr("MANGOHUD_CONFIG"))
+        config_title.setObjectName("Accent")
+        config_title.setStyleSheet(
+            "font-family:'DejaVu Sans Mono'; font-size:8pt; font-weight:700;"
+        )
+        right.addWidget(config_title)
+        self.config_preview = QPlainTextEdit()
+        self.config_preview.setReadOnly(True)
+        self.config_preview.setMaximumHeight(120)
+        right.addWidget(self.config_preview)
+        columns.addWidget(right_panel, 1)
+        outer.addLayout(columns, 1)
+
+        self._wire_preview()
+        self.apply_profile(self.db.get_mangohud())
+
+    def _panel(self, title: str, subtitle: str = "") -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        title_label = QLabel(title)
+        title_label.setObjectName("SectionTitle")
+        layout.addWidget(title_label)
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setObjectName("Muted")
+            sub.setWordWrap(True)
+            layout.addWidget(sub)
+        return frame, layout
+
+    def _labeled_row(self, label: str, widget: QWidget) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        text = QLabel(label)
+        text.setObjectName("Muted")
+        text.setMinimumWidth(100)
+        layout.addWidget(text)
+        layout.addWidget(widget, 1)
+        return row
+
+    def _wire_preview(self) -> None:
+        for checkbox in self.module_checks.values():
+            checkbox.toggled.connect(self._update_preview)
+        for widget in (
+            self.position_combo,
+            self.font_spin,
+            self.alpha_spin,
+            self.corners_spin,
+        ):
+            widget.currentIndexChanged.connect(self._update_preview) if isinstance(
+                widget, QComboBox
+            ) else widget.valueChanged.connect(self._update_preview)
+        for button in (
+            self.accent_button,
+            self.text_button,
+            self.gpu_button,
+            self.cpu_button,
+        ):
+            button.color_changed.connect(self._update_preview)
+        self.preview.position_selected.connect(self._preview_position)
+
+    def _preview_position(self, position: str) -> None:
+        index = self.position_combo.findData(position)
+        if index >= 0:
+            self.position_combo.setCurrentIndex(index)
+
+    def profile_from_ui(self) -> dict[str, Any]:
+        profile = dict(db.DEFAULT_MANGOHUD)
+        for key, checkbox in self.module_checks.items():
+            profile[key] = checkbox.isChecked()
+        profile.update(
+            {
+                "position": str(self.position_combo.currentData() or "top-left"),
+                "font_size": int(self.font_spin.value()),
+                "background_alpha": float(self.alpha_spin.value()),
+                "round_corners": int(self.corners_spin.value()),
+                "accent": self.accent_button.color(),
+                "text_color": self.text_button.color(),
+                "gpu_color": self.gpu_button.color(),
+                "cpu_color": self.cpu_button.color(),
+            }
+        )
+        return profile
+
+    def apply_profile(self, profile: dict[str, Any]) -> None:
+        for key, checkbox in self.module_checks.items():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(profile.get(key, True)))
+            checkbox.blockSignals(False)
+        position = str(profile.get("position", "top-left"))
+        index = self.position_combo.findData(position)
+        self.position_combo.blockSignals(True)
+        self.position_combo.setCurrentIndex(max(0, index))
+        self.position_combo.blockSignals(False)
+        self.font_spin.blockSignals(True)
+        self.font_spin.setValue(int(profile.get("font_size", 18)))
+        self.font_spin.blockSignals(False)
+        self.alpha_spin.blockSignals(True)
+        self.alpha_spin.setValue(float(profile.get("background_alpha", 0.35)))
+        self.alpha_spin.blockSignals(False)
+        self.corners_spin.blockSignals(True)
+        self.corners_spin.setValue(int(profile.get("round_corners", 8)))
+        self.corners_spin.blockSignals(False)
+        self.accent_button.set_color(str(profile.get("accent", "#00E5FF")))
+        self.text_button.set_color(str(profile.get("text_color", "#E6FAFF")))
+        self.gpu_button.set_color(str(profile.get("gpu_color", "#42F5A7")))
+        self.cpu_button.set_color(str(profile.get("cpu_color", "#00B8FF")))
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        profile = self.profile_from_ui()
+        self.preview.set_profile(profile, "fsr_1080_1440")
+        self.config_preview.setPlainText(mangohud_config(profile, "fsr_1080_1440", 60))
+
+    def save(self) -> None:
+        self.db.save_mangohud(self.profile_from_ui())
+        self.toast.emit(tr("Profil MangoHud zapisany."))
+        self._update_preview()
+
+    def reset(self) -> None:
+        self.apply_profile(dict(db.DEFAULT_MANGOHUD))
+        self.toast.emit(tr("Przywrócono domyślny profil nakładki."))
+
+
+class LibraryPage(QWidget):
+    launch_requested = pyqtSignal(int)
+    edit_requested = pyqtSignal(int)
+    delete_requested = pyqtSignal(int)
+    context_requested = pyqtSignal(int, object)
+    add_requested = pyqtSignal()
+    sync_requested = pyqtSignal()
+    big_picture_requested = pyqtSignal()
+    toast = pyqtSignal(str)
+
+    VIEWS = {"grid": 0, "compact": 1, "minimal": 2}
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        self._games: list[dict[str, Any]] = []
+        self._cover_cache: dict[str, QPixmap | None] = {}
+        self._dirty_views: set[str] = set()
+        self._view_mode = self.db.get_setting("library_view", "grid")
+        if self._view_mode not in self.VIEWS:
+            self._view_mode = "grid"
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(220)
+        self._search_timer.timeout.connect(self.reload)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 24, 28, 20)
+        outer.setSpacing(14)
+        header = QHBoxLayout()
+        heading_box = QVBoxLayout()
+        heading_box.setSpacing(2)
+        kicker = QLabel(tr("LIBRARY // LOCAL"))
+        kicker.setObjectName("PageKicker")
+        heading_box.addWidget(kicker)
+        heading = QLabel(tr("Biblioteka"))
+        heading.setObjectName("PageTitle")
+        heading_box.addWidget(heading)
+        header.addLayout(heading_box)
+        header.addStretch(1)
+        self.stats_label = QLabel(tr("0 GIER // 0 STEAM"))
+        self.stats_label.setObjectName("StatsPill")
+        header.addWidget(self.stats_label)
+        add = QPushButton(tr("＋  DODAJ GRĘ"))
+        add.setObjectName("PrimaryButton")
+        add.clicked.connect(self.add_requested.emit)
+        header.addWidget(add)
+        outer.addLayout(header)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(7)
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("Search")
+        self.search_edit.setPlaceholderText(tr("Szukaj gry...  (Ctrl+F)"))
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(lambda _text: self._search_timer.start())
+        toolbar.addWidget(self.search_edit, 1)
+        self.sync_button = QPushButton(tr("↻  SYNCHRONIZUJ STEAM"))
+        self.sync_button.setObjectName("GhostButton")
+        self.sync_button.clicked.connect(self.sync_requested.emit)
+        toolbar.addWidget(self.sync_button)
+        self.view_group = QButtonGroup(self)
+        self.view_group.setExclusive(True)
+        self.view_buttons: dict[str, QPushButton] = {}
+        for mode, label in (
+            ("grid", tr("SIATKA")),
+            ("compact", tr("KOMPAKT")),
+            ("minimal", tr("MINIMAL")),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("ViewButton")
+            button.setCheckable(True)
+            button.setProperty("view", mode)
+            button.clicked.connect(partial(self.set_view, mode))
+            self.view_group.addButton(button)
+            self.view_buttons[mode] = button
+            toolbar.addWidget(button)
+            if mode == self._view_mode:
+                button.setChecked(True)
+        self.console_button = QPushButton(tr("BIG PICTURE"))
+        self.console_button.setObjectName("ViewButton")
+        self.console_button.setCheckable(True)
+        self.console_button.setToolTip(tr("Pełnoekranowy tryb konsolowy z obsługą pada"))
+        self.console_button.clicked.connect(self.big_picture_requested.emit)
+        self.view_group.addButton(self.console_button)
+        toolbar.addWidget(self.console_button)
+        outer.addLayout(toolbar)
+
+        self.stack = QStackedWidget()
+        self.grid_footer = QLabel("")
+        self.compact_footer = QLabel("")
+        self.grid_layout: FlowLayout
+        self.compact_layout: QVBoxLayout
+        self.grid_scroll, self.grid_layout = self._make_grid_view()
+        self.compact_scroll, self.compact_layout = self._make_compact_view()
+        self.minimal_tree = QTreeWidget()
+        self.minimal_tree.setHeaderLabels([tr("GRA"), tr("ŹRÓDŁO"), tr("SKALOWANIE"), tr("FPS"), tr("RUNNER")])
+        self.minimal_tree.setRootIsDecorated(False)
+        self.minimal_tree.setAlternatingRowColors(True)
+        self.minimal_tree.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.minimal_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.minimal_tree.customContextMenuRequested.connect(self._minimal_context)
+        self.minimal_tree.itemDoubleClicked.connect(self._minimal_launch)
+        self.minimal_tree.setColumnWidth(0, 330)
+        self.minimal_tree.setColumnWidth(1, 150)
+        self.minimal_tree.setColumnWidth(2, 210)
+        self.minimal_tree.setColumnWidth(3, 70)
+        self.minimal_tree.header().setStretchLastSection(True)
+        self.stack.addWidget(self.grid_scroll)
+        self.stack.addWidget(self.compact_scroll)
+        self.stack.addWidget(self.minimal_tree)
+        self.stack.setCurrentIndex(self.VIEWS[self._view_mode])
+        outer.addWidget(self.stack, 1)
+        self.reload()
+
+    def _make_grid_view(self) -> tuple[QScrollArea, FlowLayout]:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        style_scroll_area(scroll)
+        host = QWidget()
+        layout = FlowLayout(host, margin=2, h_spacing=16, v_spacing=16)
+        host.setLayout(layout)
+        scroll.setWidget(host)
+        return scroll, layout
+
+    def _make_compact_view(self) -> tuple[QScrollArea, QVBoxLayout]:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        style_scroll_area(scroll)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(2, 2, 8, 8)
+        layout.setSpacing(8)
+        host.setLayout(layout)
+        scroll.setWidget(host)
+        return scroll, layout
+
+    def set_view(self, mode: str) -> None:
+        if mode not in self.VIEWS:
+            return
+        self._view_mode = mode
+        self.db.set_setting("library_view", mode)
+        button = self.view_buttons.get(mode)
+        if button is not None:
+            button.setChecked(True)
+        self.console_button.setChecked(False)
+        self.stack.setCurrentIndex(self.VIEWS[mode])
+        if mode in self._dirty_views:
+            self._rebuild_view(mode)
+            self._dirty_views.discard(mode)
+        if mode == "minimal":
+            self.toast.emit(tr("Widok minimalny: gry uruchomisz też z menu traya."))
+
+    def set_console_active(self, active: bool) -> None:
+        if active:
+            self.console_button.setChecked(True)
+        else:
+            self.console_button.setChecked(False)
+            button = self.view_buttons.get(self._view_mode)
+            if button is not None:
+                button.setChecked(True)
+
+    def focus_search(self) -> None:
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
+
+    def _cover_for(self, game: dict[str, Any]) -> QPixmap | None:
+        path_text = str(game.get("cover_path", "") or "")
+        if not path_text:
+            return None
+        path = Path(path_text).expanduser()
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        key = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        if key not in self._cover_cache:
+            pixmap = QPixmap(str(path))
+            self._cover_cache[key] = None if pixmap.isNull() else pixmap
+        return self._cover_cache[key]
+
+    def reload(self) -> None:
+        search = self.search_edit.text().strip()
+        self._games = self.db.list_games(search)
+        for game in self._games:
+            game["_bits"] = exe_bits(str(game.get("exe_path", "")))
+        stats = self.db.stats()
+        self.stats_label.setText(tr("{games} GIER // {steam} STEAM", games=stats["games"], steam=stats["steam"]))
+        self._dirty_views = set(self.VIEWS)
+        self._rebuild_view(self._view_mode)
+        self._dirty_views.discard(self._view_mode)
+
+    def free_resources(self) -> None:
+        """Drop cover pixmaps and card widgets while the game is running."""
+        self.grid_layout.clear()
+        self._clear_layout(self.compact_layout)
+        self.minimal_tree.clear()
+        self._cover_cache.clear()
+        self._dirty_views = set(self.VIEWS)
+
+    def _clear_layout(self, layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _empty_widget(self, text: str) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        frame.setMinimumHeight(180)
+        frame.setMinimumWidth(420)
+        layout = QVBoxLayout(frame)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel(text)
+        title.setObjectName("SectionTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        hint = QLabel(tr("Użyj „DODAJ GRĘ” lub zsynchronizuj bibliotekę Steam."))
+        hint.setObjectName("Muted")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+        return frame
+
+    def _rebuild_view(self, mode: str) -> None:
+        if mode == "grid":
+            self.grid_layout.clear()
+            if not self._games:
+                self.grid_layout.addWidget(self._empty_widget(tr("Biblioteka jest pusta")))
+                return
+            for game in self._games:
+                card = GameCard(game, self._cover_for(game))
+                card.launch_requested.connect(self.launch_requested.emit)
+                card.edit_requested.connect(self.edit_requested.emit)
+                card.delete_requested.connect(self.delete_requested.emit)
+                card.context_requested.connect(self.context_requested.emit)
+                self.grid_layout.addWidget(card)
+        elif mode == "compact":
+            self._clear_layout(self.compact_layout)
+            if not self._games:
+                self.compact_layout.addWidget(self._empty_widget(tr("Biblioteka jest pusta")))
+                self.compact_layout.addStretch(1)
+                return
+            for game in self._games:
+                row = CompactGameRow(game, self._cover_for(game))
+                row.launch_requested.connect(self.launch_requested.emit)
+                row.edit_requested.connect(self.edit_requested.emit)
+                row.delete_requested.connect(self.delete_requested.emit)
+                row.context_requested.connect(self.context_requested.emit)
+                self.compact_layout.addWidget(row)
+            self.compact_layout.addStretch(1)
+        else:
+            self.minimal_tree.clear()
+            if not self._games:
+                item = QTreeWidgetItem([tr("Brak gier."), "", "", "", ""])
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.minimal_tree.addTopLevelItem(item)
+                return
+            for game in self._games:
+                source = (
+                    f"STEAM {game.get('steam_appid', '')}"
+                    if game.get("is_steam")
+                    else "STANDALONE"
+                )
+                if game.get("_bits"):
+                    source += f" / {game['_bits']}-BIT"
+                runner = Path(str(game.get("runner_path", ""))).name or "AUTO"
+                item = QTreeWidgetItem(
+                    [
+                        str(game.get("name", "")),
+                        source,
+                        scaling_label(str(game.get("scaling_mode", "native"))),
+                        str(int(game.get("fps_limit", 0)) or "∞"),
+                        runner,
+                    ]
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, int(game["id"]))
+                item.setToolTip(0, str(game.get("exe_path", "")))
+                self.minimal_tree.addTopLevelItem(item)
+
+    def _minimal_launch(self, item: QTreeWidgetItem, _column: int = 0) -> None:
+        game_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if game_id is not None:
+            self.launch_requested.emit(int(game_id))
+
+    def _minimal_context(self, position: QPoint) -> None:
+        item = self.minimal_tree.itemAt(position)
+        if not item:
+            return
+        game_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if game_id is not None:
+            self.context_requested.emit(
+                int(game_id), self.minimal_tree.viewport().mapToGlobal(position)
+            )
+
+    def set_sync_busy(self, busy: bool) -> None:
+        self.sync_button.setEnabled(not busy)
+        self.search_edit.setEnabled(not busy)
+def write_runtime_file(
+    database: Database,
+    game: dict[str, Any],
+    command: list[str] | None = None,
+    *,
+    direct: bool = False,
+    use_prefix: bool = True,
+) -> Path:
+    """Build the shell-quoted runtime file consumed by launcher.sh.
+
+    ``direct`` is used by the Steam wrapper: Steam has already constructed the
+    wine/proton command, so launcher.sh must not prepend another Wine binary.
+    """
+    if direct and not command:
+        raise RuntimeError(tr("Brak komendy przekazanej przez Steam."))
+
+    exe = Path(str(game.get("exe_path", ""))).expanduser()
+    prefix: Path | None = None
+    runner = None
+    proton = None
+    if not direct:
+        if not exe.is_file():
+            raise RuntimeError(tr("Plik EXE nie istnieje:\n{path}", path=exe))
+        try:
+            exe = exe.resolve()
+        except OSError:
             pass
-        if cursor is not None:
+        runner = resolve_runner(
+            str(game.get("runner_path", "")),
+            str(database.get_setting("default_runner", "")),
+        )
+        if runner is None:
+            raise RuntimeError(
+                tr("Brak runnera Wine. Zainstaluj Wine albo pobierz Proton-GE/Wine-GE "
+                "w Menedżerze runnerów.")
+ )
+        if not os.access(runner.path, os.X_OK):
+            raise RuntimeError(tr("Runner nie jest wykonywalny:\n{path}", path=runner.path))
+        if runner.kind == "proton":
+            proton = find_proton_script(runner.path)
+        if use_prefix:
+            prefix_text = str(game.get("wine_prefix", "")).strip()
+            if not prefix_text:
+                prefix_text = db.make_prefix(str(game.get("name", "game")))
+            prefix = Path(prefix_text).expanduser()
+            prefix.mkdir(parents=True, exist_ok=True)
             try:
-                root.change_attributes(cursor=X.NONE)
-            except Exception:
+                prefix = prefix.resolve()
+            except OSError:
                 pass
+
+    env = parse_env_vars(str(game.get("env_vars", "")))
+    if direct:
+        if game.get("steam_appid"):
+            env.setdefault("SteamAppId", str(game["steam_appid"]))
+            env.setdefault("SteamGameId", str(game["steam_appid"]))
+        env.pop("WINEPREFIX", None)
+    elif prefix:
+        if runner is not None and runner.kind == "proton":
+            # Proton derives WINEPREFIX from STEAM_COMPAT_DATA_PATH.  Leave it
+            # unset so the Proton script can create/use <prefix>/pfx.
+            env.pop("WINEPREFIX", None)
+        else:
+            env["WINEPREFIX"] = str(prefix)
+
+    scaling = str(game.get("scaling_mode", "native"))
+    profile = SCALING_PROFILES.get(scaling, SCALING_PROFILES["native"])
+    if profile.get("kind") == "proton":
+        env.setdefault("WINE_FULLSCREEN_FSR", "1")
+        env.setdefault(
+            "WINE_FULLSCREEN_FSR_STRENGTH", str(profile.get("fsr_strength", 2))
+        )
+
+    fps_limit = int(game.get("fps_limit", 0) or 0)
+    if fps_limit > 0:
+        env.setdefault("DXVK_FRAME_RATE", str(fps_limit))
+
+    mangohud_enabled = database.get_bool("mangohud", True)
+    hud = mangohud_config(database.get_mangohud(), scaling, fps_limit)
+    crt_path = ""
+    if scaling == "crt":
+        settings_shader = database.get_setting("crt_shader").strip()
+        if settings_shader and Path(settings_shader).is_file():
+            crt_path = settings_shader
+        else:
+            crt_path = str(ensure_crt_shader())
+
+    try:
+        launch_args = shlex.split(str(game.get("launch_args", "")), posix=True)
+    except ValueError as exc:
+        raise RuntimeError(tr("Nieprawidłowe argumenty uruchamiania: {error}", error=exc)) from exc
+
+    if direct:
+        full_command = list(command or []) + launch_args
+        workdir = ""
+    else:
+        full_command = [str(exe)] + launch_args
+        workdir = str(exe.parent)
+
+    game_bits = exe_bits(str(game.get("exe_path", "")))
+    if game_bits is None and command:
+        game_bits = exe_bits(str(command[0]))
+    mangohud_lib = mangohud_library_path(game_bits)
+
+    lines = [
+        "#!/bin/sh",
+        f"# Generated by Boostlayer for game {game['id']}; do not edit.",
+        f"# Mode: {'steam-direct' if direct else 'wine/proton'}",
+    ]
+    for key, value in sorted(env.items(), key=lambda item: item[0].lower()):
+        lines.append(f"export {key}={shlex.quote(str(value))}")
+    runtime_values = {
+        "BL_DEBUG": "1" if database.get_bool("debug_logging", False) else "0",
+        "BL_GAMEMODE": "1" if database.get_bool("gamemode", True) else "0",
+        "BL_MANGOHUD": "1" if mangohud_enabled else "0",
+        "BL_GAMESCOPE": "1" if database.get_bool("gamescope", True) else "0",
+        "BL_MANGOHUD_CONFIG": hud if mangohud_enabled else "",
+        "BL_MANGOHUD_LIB": mangohud_lib if mangohud_enabled else "",
+        "BL_MANGOHUD_BITS": str(game_bits or ""),
+        "BL_SCALING": scaling,
+        "BL_FPS": str(fps_limit),
+        "BL_DIRECT": "1" if direct else "0",
+        "BL_RUNNER": runner.path if runner else "",
+        "BL_RUNNER_KIND": runner.kind if runner else "",
+        "BL_PROTON": str(proton) if proton else "",
+        "BL_PREFIX": str(prefix) if prefix else "",
+        "BL_LOG": str(LAST_RUN_LOG),
+        "BL_CRT_SHADER": crt_path,
+        "BL_WORKDIR": workdir,
+        "BL_STEAM": "1" if game.get("is_steam") else "0",
+    }
+    for key, value in runtime_values.items():
+        lines.append(f"export {key}={shlex.quote(str(value))}")
+    lines.append("set -- " + " ".join(shlex.quote(item) for item in full_command))
+    lines.append("")
+
+    db.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        db.RUNTIME_DIR.chmod(0o700)
+    except OSError:
+        pass
+    for old in db.RUNTIME_DIR.glob(f"launch-{int(game['id'])}-*.sh"):
         try:
-            d.sync()
+            old.unlink()
+        except OSError:
+            pass
+    runtime_path = db.RUNTIME_DIR / f"launch-{int(game['id'])}-{uuid.uuid4().hex[:10]}.sh"
+    descriptor = os.open(
+        runtime_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    return runtime_path
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, database: Database) -> None:
+        super().__init__()
+        self.db = database
+        self._active_process: QProcess | None = None
+        self._active_game: dict[str, Any] | None = None
+        self._minimized_for_game = False
+        self._steam_game_name = ""
+        self._was_window_visible = True
+        self._was_maximized = False
+        self._force_quit = False
+        self._steam_worker: SteamSyncWorker | None = None
+        self._steam_options_worker: SteamOptionsWorker | None = None
+        self.console: ConsoleWindow | None = None
+        self._steam_pending: tuple[
+            SteamOptionsWorker,
+            QProgressDialog,
+            dict[str, Any] | None,
+            bool,
+        ] | None = None
+        self._toast_generation = 0
+        self._qt_translator: QTranslator | None = None
+        self._install_qt_translations()
+        self._launcher = ensure_launcher()
+        self._crt_shader = ensure_crt_shader()
+        self.setWindowTitle(f"{APP_NAME} // {APP_VERSION}")
+        self.setWindowIcon(app_icon())
+        self.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setMinimumSize(1020, 700)
+        self.resize(1320, 830)
+        self._build_ui()
+        self._build_menu()
+        self._build_shortcuts()
+        self._build_tray()
+        self._build_hotkey()
+        self._restore_geometry()
+        self._refresh_all()
+        self._update_sidebar_state()
+
+    # ------------------------------------------------------------------- layout
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root.setObjectName("Root")
+        self.setCentralWidget(root)
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.titlebar = TitleBar(self)
+        self.titlebar.menu_requested.connect(self._show_app_menu)
+        root_layout.addWidget(self.titlebar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(196)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(14, 20, 14, 16)
+        side.setSpacing(7)
+        caption = QLabel(tr("NAWIGACJA"))
+        caption.setObjectName("SidebarCaption")
+        side.addWidget(caption)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        menu_items = (
+            (tr("01   BIBLIOTEKA"), 0),
+            (tr("02   USTAWIENIA"), 1),
+            (tr("03   RUNNERY"), 2),
+            (tr("04   MANGOHUD"), 3),
+        )
+        for label, index in menu_items:
+            button = QPushButton(label)
+            button.setObjectName("NavButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            if index == 0:
+                button.setChecked(True)
+            self.nav_group.addButton(button, index)
+            side.addWidget(button)
+        side.addStretch(1)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet("color:#222A31;")
+        side.addWidget(separator)
+        local = QLabel(tr("LOCAL // SQLITE"))
+        local.setObjectName("SidebarCaption")
+        side.addWidget(local)
+        self.sidebar_live = QLabel(tr("●  MINIMIZE: ON"))
+        self.sidebar_live.setObjectName("SidebarLive")
+        side.addWidget(self.sidebar_live)
+        db_hint = QLabel(str(db.CONFIG_DIR))
+        db_hint.setObjectName("SidebarCaption")
+        db_hint.setWordWrap(True)
+        db_hint.setToolTip(str(db.CONFIG_DIR))
+        side.addWidget(db_hint)
+        body.addWidget(sidebar)
+
+        self.stack = QStackedWidget()
+        self.library_page = LibraryPage(self.db)
+        self.settings_page = SettingsPage(self.db)
+        self.runner_page = RunnerPage(self.db)
+        self.mango_page = MangoPage(self.db)
+        for page in (
+            self.library_page,
+            self.settings_page,
+            self.runner_page,
+            self.mango_page,
+        ):
+            self.stack.addWidget(page)
+        body.addWidget(self.stack, 1)
+        root_layout.addLayout(body, 1)
+
+        self.nav_group.idClicked.connect(self._switch_page)
+        self.library_page.launch_requested.connect(self.start_game)
+        self.library_page.edit_requested.connect(self.edit_game)
+        self.library_page.delete_requested.connect(self.delete_game)
+        self.library_page.context_requested.connect(self._show_game_context)
+        self.library_page.add_requested.connect(self.add_game)
+        self.library_page.sync_requested.connect(self.sync_steam)
+        self.library_page.big_picture_requested.connect(self.open_console)
+        self.library_page.toast.connect(self.toast)
+        self.settings_page.toast.connect(self.toast)
+        self.settings_page.steam_sync_requested.connect(self.sync_steam)
+        self.settings_page.steam_wrapper_batch_requested.connect(
+            self.apply_steam_wrapper_all
+        )
+        self.settings_page.steam_restore_requested.connect(
+            self.restore_steam_backup
+        )
+        self.settings_page.clear_cache_requested.connect(self.clear_cache_dialog)
+        self.settings_page.settings_changed.connect(self._on_settings_changed)
+        self.settings_page.theme_changed.connect(self._apply_theme)
+        self.settings_page.language_changed.connect(self._on_language_changed)
+        self.runner_page.toast.connect(self.toast)
+        self.runner_page.runners_changed.connect(self.settings_page.refresh_runners)
+        self.mango_page.toast.connect(self.toast)
+
+        status_bar = QFrame()
+        status_bar.setObjectName("StatusBar")
+        status_bar.setFixedHeight(32)
+        status_layout = QHBoxLayout(status_bar)
+        status_layout.setContentsMargins(12, 4, 6, 4)
+        status_layout.setSpacing(10)
+        self.status_label = QLabel(tr("GOTOWY"))
+        self.status_label.setObjectName("StatusText")
+        status_layout.addWidget(self.status_label, 1)
+        self.ghost_badge = QLabel(tr("MINIMIZE // ON"))
+        self.ghost_badge.setObjectName("GhostBadge")
+        status_layout.addWidget(self.ghost_badge)
+        grip = QSizeGrip(status_bar)
+        status_layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom)
+        root_layout.addWidget(status_bar)
+
+    def _switch_page(self, index: int) -> None:
+        if 0 <= index < self.stack.count():
+            self.stack.setCurrentIndex(index)
+
+    def _build_shortcuts(self) -> None:
+        shortcuts = (
+            ("Ctrl+N", self.add_game),
+            ("Ctrl+R", self._refresh_all),
+            ("Ctrl+F", self.library_page.focus_search),
+            ("F5", self.sync_steam),
+            ("Ctrl+L", self.show_last_run_log),
+        )
+        for sequence, callback in shortcuts:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(callback)
+
+    def _build_menu(self) -> None:
+        self.app_menu = QMenu(self)
+        add_action = QAction(tr("Dodaj grę"), self)
+        add_action.setShortcut(QKeySequence("Ctrl+N"))
+        add_action.triggered.connect(self.add_game)
+        self.app_menu.addAction(add_action)
+
+        sync_action = QAction(tr("Synchronizuj Steam"), self)
+        sync_action.setShortcut(QKeySequence("F5"))
+        sync_action.triggered.connect(self.sync_steam)
+        self.app_menu.addAction(sync_action)
+
+        minimal_action = QAction(tr("Tryb minimalny / tray"), self)
+        minimal_action.triggered.connect(self._show_minimal)
+        self.app_menu.addAction(minimal_action)
+
+        console_action = QAction(tr("Tryb konsolowy (Big Picture)"), self)
+        console_action.triggered.connect(self.open_console)
+        self.app_menu.addAction(console_action)
+        self.app_menu.addSeparator()
+
+        cache_action = QAction(tr("Wyczyść shader cache..."), self)
+        cache_action.triggered.connect(self.clear_cache_dialog)
+        self.app_menu.addAction(cache_action)
+
+        log_action = QAction(tr("Pokaż last_run.log"), self)
+        log_action.setShortcut(QKeySequence("Ctrl+L"))
+        log_action.triggered.connect(self.show_last_run_log)
+        self.app_menu.addAction(log_action)
+
+        config_action = QAction(tr("Otwórz katalog konfiguracji"), self)
+        config_action.triggered.connect(self._open_config_dir)
+        self.app_menu.addAction(config_action)
+        self.app_menu.addSeparator()
+
+        about_action = QAction(tr("O programie"), self)
+        about_action.triggered.connect(self._about)
+        self.app_menu.addAction(about_action)
+
+        quit_action = QAction(tr("Zakończ"), self)
+        quit_action.triggered.connect(self.quit_app)
+        self.app_menu.addAction(quit_action)
+
+    def _show_app_menu(self) -> None:
+        position = self.titlebar.mapToGlobal(
+            QPoint(max(0, self.titlebar.width() - 130), 50)
+        )
+        self.app_menu.exec(position)
+
+    def _show_minimal(self) -> None:
+        self.library_page.search_edit.clear()
+        self.library_page.set_view("minimal")
+        self.nav_group.button(0).setChecked(True)
+        self.stack.setCurrentIndex(0)
+        self.show_window()
+
+    # ------------------------------------------------------------------- tray
+    def _build_tray(self) -> None:
+        self.tray: QSystemTrayIcon | None = None
+        self.tray_menu: QMenu | None = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self.tray = QSystemTrayIcon(app_icon(96), self)
+        self.tray.setToolTip(f"{APP_NAME} // Game Runtime Control")
+        self.tray_menu = QMenu(self)
+        self.tray_menu.setObjectName("TrayMenu")
+        self.tray_menu.setStyleSheet(build_qss(TRAY_QSS))
+        self.tray_menu.setMinimumWidth(300)
+        self.tray_menu.setToolTipsVisible(True)
+        self.tray_menu.setSeparatorsCollapsible(False)
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+        self._refresh_tray_menu()
+
+    def _tray_game_icon(self, game: dict[str, Any]) -> QIcon:
+        cover = Path(str(game.get("cover_path", "") or "")).expanduser()
+        if cover.is_file():
+            icon = QIcon(str(cover))
+            if not icon.isNull():
+                return icon
+        return app_icon(40)
+
+    def _refresh_tray_menu(self) -> None:
+        menu = getattr(self, "tray_menu", None)
+        if menu is None:
+            return
+        menu.clear()
+
+        header = QWidget(menu)
+        header.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(9, 7, 10, 7)
+        header_layout.setSpacing(10)
+        icon_label = QLabel()
+        icon_label.setPixmap(app_icon(40).pixmap(40, 40))
+        header_layout.addWidget(icon_label)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(1)
+        title = QLabel(tr("BOOSTLAYER"))
+        title.setStyleSheet(
+            "color:#00E5FF; font-weight:800; letter-spacing:2px; font-size:10pt;"
+        )
+        subtitle = QLabel(tr("GAME RUNTIME CONTROL"))
+        subtitle.setStyleSheet(
+            "color:#6C808C; font-family:'DejaVu Sans Mono'; font-size:7pt;"
+        )
+        text_box.addWidget(title)
+        text_box.addWidget(subtitle)
+        header_layout.addLayout(text_box)
+        header_layout.addStretch(1)
+        header_action = QWidgetAction(menu)
+        header_action.setDefaultWidget(header)
+        menu.addAction(header_action)
+        menu.addSeparator()
+
+        if self._active_process is not None and self._active_game:
+            status_name = str(self._active_game.get("name", "")).replace("&", "&&")
+            status_text = tr("●  GRA: {name}", name=status_name)
+        elif self._steam_game_name:
+            status_name = self._steam_game_name.replace("&", "&&")
+            status_text = tr("●  STEAM: {name}", name=status_name)
+        else:
+            status_text = tr("○  Brak aktywnej gry")
+        status = menu.addAction(status_text)
+        status.setEnabled(False)
+        hud_on = self.db.get_bool("mangohud", True)
+        hud_text = (
+            tr("MangoHud: ON")
+            if hud_on and shutil.which("mangohud")
+            else (tr("MangoHud: BRAK") if hud_on else tr("MangoHud: OFF"))
+        )
+        hud = menu.addAction(hud_text)
+        hud.setEnabled(False)
+        gm_on = self.db.get_bool("gamemode", True)
+        gm_text = (
+            tr("GameMode: ON")
+            if gm_on and shutil.which("gamemoderun")
+            else (tr("GameMode: BRAK") if gm_on else tr("GameMode: OFF"))
+        )
+        gamemode = menu.addAction(gm_text)
+        gamemode.setEnabled(False)
+
+        menu.addSeparator()
+        section = menu.addAction(tr("BIBLIOTEKA"))
+        section.setEnabled(False)
+        games = self.db.list_games()
+        for game in games[:8]:
+            game_name = str(game.get("name", tr("Bez nazwy"))).replace("&", "&&")
+            action = menu.addAction(
+                self._tray_game_icon(game),
+                game_name + ("   [Steam]" if game.get("is_steam") else ""),
+            )
+            action.triggered.connect(
+                lambda _checked=False, game_id=int(game["id"]): self.start_game(game_id)
+            )
+        if not games:
+            empty = menu.addAction(tr("Brak gier — dodaj pierwszą w bibliotece."))
+            empty.setEnabled(False)
+
+        menu.addSeparator()
+        if self.isVisible() and not self.isMinimized():
+            hide_action = menu.addAction(tr("Minimalizuj Boostlayer"))
+            hide_action.triggered.connect(self.showMinimized)
+        else:
+            show_action = menu.addAction(tr("Pokaż Boostlayer"))
+            show_action.triggered.connect(self.show_window)
+        minimal_action = menu.addAction(tr("Tryb minimalny"))
+        minimal_action.triggered.connect(self._show_minimal)
+        settings_action = menu.addAction(tr("Ustawienia"))
+        settings_action.triggered.connect(self._open_settings_page)
+        console_action = menu.addAction(tr("Tryb konsolowy  [Big Picture]"))
+        console_action.triggered.connect(self.open_console)
+
+        if self._active_process is not None and self._active_game:
+            stop_name = str(self._active_game.get("name", "")).replace("&", "&&")
+            stop = menu.addAction(tr("Zakończ grę: {name}", name=stop_name))
+            stop.triggered.connect(self.stop_game)
+
+        menu.addSeparator()
+        quit_action = menu.addAction(tr("Zakończ Boostlayer"))
+        quit_action.triggered.connect(self.quit_app)
+
+    def _open_settings_page(self) -> None:
+        self.nav_group.button(1).setChecked(True)
+        self.stack.setCurrentIndex(1)
+        self.show_window()
+
+    def open_console(self) -> None:
+        if self.console is None:
+            self.console = ConsoleWindow(self.db)
+            self.console.launch_requested.connect(self._console_launch)
+            self.console.edit_requested.connect(self._console_edit)
+            self.console.closed.connect(self._console_closed)
+        self.console.reload()
+        self.library_page.set_console_active(True)
+        self.hide()
+        self.console.open_on_screen(self.db.get_int("console_monitor", 0))
+
+    def _console_launch(self, game_id: int) -> None:
+        if self.console is not None:
+            self.console.hide()
+        self.library_page.set_console_active(False)
+        self.start_game(game_id)
+
+    def _console_edit(self, game_id: int) -> None:
+        if self.console is not None:
+            self.console.hide()
+        self.library_page.set_console_active(False)
+        self.show_window()
+        self.edit_game(game_id)
+
+    def _console_closed(self) -> None:
+        self.library_page.set_console_active(False)
+        self.show_window()
+
+    def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self.show_window()
+
+    def _build_hotkey(self) -> None:
+        self._hotkey = X11GlobalHotkey(self)
+        self._hotkey.activated.connect(self.toggle_window)
+        self._hotkey_shortcut = QShortcut(QKeySequence("Ctrl+Alt+S"), self)
+        self._hotkey_shortcut.activated.connect(self.toggle_window)
+        self._hotkey_shortcut.setEnabled(False)
+        self._apply_hotkey_setting()
+
+    def _apply_hotkey_setting(self) -> None:
+        enabled = self.db.get_bool("global_hotkey", True)
+        if not enabled:
+            self._hotkey.stop()
+            self._hotkey_shortcut.setEnabled(False)
+            return
+        if not self._hotkey.available:
+            self._hotkey.start()
+        self._hotkey_shortcut.setEnabled(not self._hotkey.available)
+
+    def toggle_window(self) -> None:
+        if self.console is not None and self.console.isVisible():
+            self.console.close_console()
+            return
+        if self.isVisible() and not self.isMinimized():
+            self.showMinimized()
+        else:
+            self.show_window()
+
+    def shutdown_hotkey(self) -> None:
+        self._hotkey.stop()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            QTimer.singleShot(0, self._refresh_tray_menu)
+
+    def show_window(self) -> None:
+        self._minimized_for_game = False
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self._update_sidebar_state()
+        self._refresh_tray_menu()
+
+    def hide_to_tray(self) -> None:
+        if self.tray is not None:
+            self.hide()
+            self._refresh_tray_menu()
+            self.tray.showMessage(
+                APP_NAME,
+                tr("Działa w tle. Menu traya uruchomi gry i pokaże okno."),
+                QSystemTrayIcon.MessageIcon.Information,
+                2600,
+            )
+
+    # ------------------------------------------------------------------ state
+    def toast(self, message: str) -> None:
+        self._toast_generation += 1
+        generation = self._toast_generation
+        self.status_label.setText(message)
+        QTimer.singleShot(
+            4500,
+            lambda: self.status_label.setText(tr("GOTOWY"))
+            if generation == self._toast_generation
+            else None,
+        )
+
+    def _update_sidebar_state(self) -> None:
+        minimize = self.db.get_bool("ghost_mode", True)
+        if self._active_process is not None:
+            self.sidebar_live.setText(tr("●  GAME: RUNNING"))
+            self.ghost_badge.setText(tr("MINIMIZE // GAME ACTIVE"))
+        else:
+            self.sidebar_live.setText(
+                tr("●  MINIMIZE: ON") if minimize else tr("○  MINIMIZE: OFF")
+            )
+            self.ghost_badge.setText(
+                tr("MINIMIZE // ON") if minimize else tr("MINIMIZE // OFF")
+            )
+
+    def _refresh_all(self) -> None:
+        self.library_page.reload()
+        self.settings_page.refresh_runners()
+        self.runner_page.refresh()
+        if self.console is not None:
+            self.console.reload()
+        self._update_sidebar_state()
+        self._refresh_tray_menu()
+        self.toast(tr("Biblioteka odświeżona."))
+
+    def _install_qt_translations(self) -> None:
+        """Load Qt's own translations for standard dialog buttons."""
+        app = QCoreApplication.instance()
+        if app is None:
+            return
+        if self._qt_translator is not None:
+            app.removeTranslator(self._qt_translator)
+            self._qt_translator.deleteLater()
+            self._qt_translator = None
+        language = get_language()
+        if language == "en":
+            return
+        translator = QTranslator(self)
+        translations = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        for filename in (f"qtbase_{language}.qm", f"qt_{language}.qm"):
+            if translator.load(filename, translations):
+                app.installTranslator(translator)
+                self._qt_translator = translator
+                return
+        translator.deleteLater()
+
+    def _on_language_changed(self, code: str) -> None:
+        set_language(code)
+        current_page = self.stack.currentIndex()
+        QTimer.singleShot(0, lambda: self._rebuild_ui(current_page))
+
+    def _rebuild_ui(self, current_page: int) -> None:
+        """Rebuild the presentation layer after a live language change."""
+        self._install_qt_translations()
+        if self.console is not None:
+            self.console.hide()
+            self.console.deleteLater()
+            self.console = None
+        if getattr(self, "tray", None) is not None:
+            self.tray.hide()
+            self.tray.deleteLater()
+            self.tray = None
+        if getattr(self, "tray_menu", None) is not None:
+            self.tray_menu.deleteLater()
+            self.tray_menu = None
+        if getattr(self, "app_menu", None) is not None:
+            self.app_menu.deleteLater()
+            self.app_menu = None
+        for shortcut in self.findChildren(QShortcut):
+            if shortcut is getattr(self, "_hotkey_shortcut", None):
+                continue
+            shortcut.deleteLater()
+        if getattr(self, "nav_group", None) is not None:
+            self.nav_group.deleteLater()
+            self.nav_group = None
+        central = self.takeCentralWidget()
+        if central is not None:
+            central.deleteLater()
+
+        self._build_ui()
+        self._build_menu()
+        self._build_shortcuts()
+        self._build_tray()
+        self._refresh_all()
+        self._update_sidebar_state()
+        if 0 <= current_page < self.stack.count():
+            self.stack.setCurrentIndex(current_page)
+            button = self.nav_group.button(current_page)
+            if button is not None:
+                button.setChecked(True)
+        self.toast(tr("Język: {name}", name=LANGUAGES[get_language()]))
+
+    def _on_settings_changed(self) -> None:
+        self.settings_page.refresh_runners()
+        self._apply_theme(self.db.get_setting("theme", DEFAULT_THEME))
+        self._update_sidebar_state()
+        self._refresh_tray_menu()
+        self._apply_hotkey_setting()
+        self.toast(tr("Konfiguracja globalna zapisana."))
+
+    def _apply_theme(self, key: str) -> None:
+        theme = set_theme(key)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_qss(QSS))
+            app.setWindowIcon(app_icon())
+        self.setWindowIcon(app_icon())
+        self.library_page.reload()
+        if self.tray is not None:
+            self.tray.setIcon(app_icon(96))
+        if getattr(self, "tray_menu", None) is not None:
+            self.tray_menu.setStyleSheet(build_qss(TRAY_QSS))
+        if self.console is not None:
+            self.console.setWindowIcon(app_icon())
+            self.console.reload()
+        self._refresh_tray_menu()
+        self.titlebar.update()
+        log.info("Theme applied: %s", theme.name)
+
+    # ---------------------------------------------------------------- library
+    def add_game(self) -> None:
+        dialog = GameDialog(self.db, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.library_page.reload()
+            self._refresh_tray_menu()
+            self.toast(tr("Gra dodana do biblioteki."))
+
+    def edit_game(self, game_id: int) -> None:
+        game = self.db.get_game(game_id)
+        if not game:
+            return
+        dialog = GameDialog(self.db, game=game, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.library_page.reload()
+            self._refresh_tray_menu()
+            self.toast(tr("Zapisano konfigurację gry."))
+
+    def delete_game(self, game_id: int) -> None:
+        game = self.db.get_game(game_id)
+        if not game:
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Usuń grę"),
+            tr(
+                "Usunąć „{name}” z biblioteki?\n\n"
+                "WINEPREFIX pozostanie na dysku:\n{prefix}",
+                name=game["name"],
+                prefix=game.get("wine_prefix", ""),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.db.delete_game(game_id)
+        self.library_page.reload()
+        self._refresh_tray_menu()
+        self.toast(tr("Wpis usunięty z biblioteki."))
+
+    def _show_game_context(self, game_id: int, position: QPoint) -> None:
+        game = self.db.get_game(game_id)
+        if not game:
+            return
+        menu = QMenu(self)
+        launch = menu.addAction(tr("▶  Uruchom grę"))
+        launch.triggered.connect(lambda: self.start_game(game_id))
+        edit = menu.addAction(tr("✎  Edytuj"))
+        edit.triggered.connect(lambda: self.edit_game(game_id))
+        if game.get("is_steam") and game.get("steam_appid"):
+            copy_option = menu.addAction(tr("⧉  Kopiuj opcję uruchamiania Steam"))
+            copy_option.triggered.connect(lambda: self._copy_steam_option_for())
+            repair = menu.addAction(tr("🛠  Napraw opcję uruchamiania Steam"))
+            repair.triggered.connect(lambda: self.repair_steam_options(game_id))
+        menu.addSeparator()
+        folder = menu.addAction(tr("Otwórz katalog gry"))
+        folder_target = Path(str(game.get("exe_path", ""))).expanduser()
+        if folder_target.is_file():
+            folder_target = folder_target.parent
+        folder.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder_target)))
+        )
+        cache = menu.addAction(tr("Wyczyść shader cache tej gry"))
+        cache.triggered.connect(lambda: self.clear_cache_for_game(game_id))
+        menu.addSeparator()
+        delete = menu.addAction(tr("×  Usuń z biblioteki"))
+        delete.triggered.connect(lambda: self.delete_game(game_id))
+        menu.exec(position)
+
+    def _copy_steam_option_for(self) -> None:
+        try:
+            path = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        self.db.set_setting("steam_wrapper", str(path))
+        QApplication.clipboard().setText(steam_launch_option(path))
+        self.toast(tr("Opcja uruchamiania Steam skopiowana do schowka."))
+
+    # ------------------------------------------------------------------ Steam
+    def sync_steam(self) -> None:
+        if self._steam_worker is not None:
+            self.toast(tr("Synchronizacja Steam już trwa."))
+            return
+        self.library_page.set_sync_busy(True)
+        self.settings_page.set_busy(True)
+        self.toast(tr("Synchronizacja Steam..."))
+        worker = SteamSyncWorker(self)
+        self._steam_worker = worker
+        worker.status.connect(self._steam_status)
+        worker.result.connect(self._steam_result)
+        worker.finished.connect(self._steam_finished)
+        worker.start()
+
+    def _steam_status(self, message: str) -> None:
+        self.status_label.setText(message)
+
+    def _steam_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if data.get("ok"):
+            self.library_page.reload()
+            self.settings_page.reload()
+            self._refresh_tray_menu()
+            self.toast(
+                tr(
+                    "Steam: +{added} nowych, {updated} zaktualizowanych, "
+                    "{skipped} pominiętych.",
+                    added=data.get("added", 0),
+                    updated=data.get("updated", 0),
+                    skipped=data.get("skipped", 0),
+                )
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                tr("Steam"),
+                str(data.get("error", tr("Nieznany błąd synchronizacji."))),
+            )
+            self.toast(tr("Synchronizacja Steam nie powiodła się."))
+
+    def _steam_finished(self) -> None:
+        self.library_page.set_sync_busy(False)
+        self.settings_page.set_busy(False)
+        worker = self._steam_worker
+        self._steam_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    # ------------------------------------------------------------- launch core
+    def _stage_runtime(self, game: dict[str, Any]) -> Path:
+        if not str(game.get("wine_prefix", "")).strip():
+            prefix = db.make_prefix(str(game.get("name", "game")))
+            self.db.update_game(int(game["id"]), wine_prefix=prefix)
+            game = dict(game, wine_prefix=prefix)
+        return write_runtime_file(self.db, game)
+
+    def start_game(self, game_id: int) -> None:
+        if self._active_process is not None:
+            self.toast(tr("Gra już działa. Zakończ bieżący proces przed startem kolejnej."))
+            return
+        game = self.db.get_game(int(game_id))
+        if not game:
+            self.toast(tr("Nie znaleziono gry w bibliotece."))
+            return
+        if self.console is not None and self.console.isVisible():
+            self.console.hide()
+        if game.get("is_steam") and game.get("steam_appid"):
+            self.start_steam_game(game)
+            return
+        self._steam_game_name = ""
+        try:
+            runtime = self._stage_runtime(game)
+        except Exception as exc:
+            log.error("Cannot prepare launch: %s", exc)
+            QMessageBox.warning(self, tr("Nie można uruchomić"), str(exc))
+            return
+
+        bits = exe_bits(str(game.get("exe_path", "")))
+        if (
+            bits == 32
+            and self.db.get_bool("mangohud", True)
+            and not mangohud32_path()
+        ):
+            self.toast(
+                tr("Gra jest 32-bitowa, a brakuje 32-bitowego MangoHud. "
+                "Użyj Ustawienia → Zależności → MangoHud 32-bit.")
+            )
+        if (
+            bits == 32
+            and self.db.get_bool("gamemode", True)
+            and not gamemode32_installed()
+        ):
+            self.toast(
+                tr("Brak 32-bitowych bibliotek GameMode — zainstaluj je w "
+                "Ustawienia → Zależności.")
+            )
+        if self.db.get_bool("mangohud", True) and not shutil.which("mangohud"):
+            self.toast(
+                tr("MangoHud nie jest zainstalowany — użyj Ustawienia → Zależności.")
+            )
+        if self.db.get_bool("gamemode", True) and not shutil.which("gamemoderun"):
+            self.toast(
+                tr("GameMode nie jest zainstalowany — użyj Ustawienia → Zależności.")
+            )
+        if (
+            str(game.get("scaling_mode", "native")) not in {"native"}
+            and self.db.get_bool("gamescope", True)
+            and not shutil.which("gamescope")
+        ):
+            self.toast(
+                tr("Gamescope nie jest zainstalowany — profil skalowania zostanie "
+                "pominięty. Użyj Proton FSR lub zainstaluj Gamescope.")
+            )
+
+        process = QProcess(self)
+        process.setProgram("/bin/sh")
+        process.setArguments([str(self._launcher), str(runtime)])
+        working_dir = Path(str(game.get("exe_path", ""))).expanduser().parent
+        if working_dir.is_dir():
+            process.setWorkingDirectory(str(working_dir))
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.started.connect(partial(self._on_game_started, process, game))
+        process.finished.connect(partial(self._on_game_finished, process))
+        process.errorOccurred.connect(partial(self._on_game_error, process))
+        self._active_process = process
+        self._active_game = game
+        self.status_label.setText(f"URUCHAMIANIE // {game.get('name', '')}")
+        self._update_sidebar_state()
+        log.info("Launching game id=%s name=%s runtime=%s", game_id, game.get("name"), runtime)
+        process.start()
+
+    def start_steam_game(self, game: dict[str, Any]) -> None:
+        """Hand a Steam entry to Steam, injecting LaunchOptions when needed."""
+        if self._steam_options_worker is not None:
+            self.toast(tr("Trwa operacja na konfiguracji Steam. Poczekaj."))
+            return
+        appid = str(game.get("steam_appid", "")).strip()
+        client = steam_client_command()
+        if not client:
+            QMessageBox.warning(
+                self,
+                tr("Steam"),
+                tr("Nie znaleziono klienta Steam w PATH ani Flatpaka "
+                "com.valvesoftware.Steam."),
+            )
+            return
+        try:
+            wrapper = ensure_steam_wrapper()
+            option = steam_launch_option(wrapper)
+            self.db.set_setting("steam_wrapper", str(wrapper))
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                tr("Steam wrapper"),
+                tr("Nie można zapisać wrappera Steam:\n{error}", error=exc),
+            )
+            return
+
+        if not self.db.get_bool("auto_steam_wrapper", True):
+            self._launch_steam_client(game)
+            return
+
+        action = steam_launch_action_for_appid(appid, wrapper)
+        if action == "ok":
+            self._launch_steam_client(game)
+            return
+        if action == "complex":
+            QApplication.clipboard().setText(option)
+            QMessageBox.information(
+                self,
+                tr("Steam wrapper"),
+                tr("Ta gra ma już złożone LaunchOptions zawierające %command%. "
+                "Boostlayer nie nadpisze ich automatycznie. Poprawna linia "
+                "została skopiowana do schowka; możesz podmienić ją ręcznie."),
+            )
+            self._launch_steam_client(game)
+            return
+        if action in {"no_account", "no_config", "parse_error"}:
+            QApplication.clipboard().setText(option)
+            QMessageBox.warning(
+                self,
+                tr("Steam wrapper"),
+                tr("Nie można odczytać aktywnego profilu Steam lub pliku "
+                "localconfig.vdf. Opcja uruchamiania została skopiowana do "
+                "schowka. Gra uruchomi się bez automatycznego wrappera."),
+            )
+            self._launch_steam_client(game)
+            return
+
+        if steam_is_running():
+            answer = QMessageBox.question(
+                self,
+                tr("Zamknąć Steam?"),
+                tr("Aby zapisać LaunchOptions, Steam musi zostać zamknięty. "
+                "Zostanie uruchomiony ponownie razem z grą.\n\n"
+                "Zamknięcie może przerwać pobieranie lub aktualizację. "
+                "Kontynuować?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                QApplication.clipboard().setText(option)
+                self._launch_steam_client(game)
+                self.toast(tr("Wrapper nie został zapisany; opcja jest w schowku."))
+                return
+
+        self._start_steam_options_worker(
+            [appid],
+            wrapper,
+            launch_game=game,
+            title="Steam wrapper",
+        )
+
+    def _launch_steam_client(self, game: dict[str, Any]) -> None:
+        appid = str(game.get("steam_appid", "")).strip()
+        client = steam_client_command()
+        if not client:
+            QMessageBox.warning(self, tr("Steam"), tr("Nie znaleziono klienta Steam."))
+            return
+        program, *arguments = client
+        ok, _pid = QProcess.startDetached(
+            program, arguments + ["-applaunch", appid]
+        )
+        if not ok:
+            QMessageBox.warning(self, tr("Steam"), tr("Nie udało się uruchomić klienta Steam."))
+            return
+        log.info("Steam launch appid=%s client=%s", appid, client)
+        self._steam_game_name = str(game.get("name", appid))
+        self.status_label.setText(f"STEAM // {self._steam_game_name}")
+        self._refresh_tray_menu()
+        self._minimize_after_launch(game)
+
+    def _start_steam_options_worker(
+        self,
+        appids: list[str],
+        wrapper: Path,
+        *,
+        launch_game: dict[str, Any] | None = None,
+        restore: bool = False,
+        title: str = "Steam wrapper",
+    ) -> None:
+        if self._steam_options_worker is not None:
+            self.toast(tr("Trwa już operacja na konfiguracji Steam."))
+            return
+        progress = QProgressDialog(
+            tr("Przygotowuję konfigurację Steam..."), None, 0, 0, self
+        )
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+        worker = SteamOptionsWorker(
+            appids, wrapper, close_steam=True, restore=restore, parent=self
+        )
+        self._steam_options_worker = worker
+        self._steam_pending = (worker, progress, launch_game, restore)
+        worker.status.connect(progress.setLabelText)
+        worker.result.connect(self._on_steam_options_result)
+        worker.finished.connect(self._on_steam_options_finished)
+        worker.start()
+
+    def _on_steam_options_result(self, payload: object) -> None:
+        pending = self._steam_pending
+        if pending is None:
+            return
+        self._steam_pending = None
+        worker, progress, launch_game, restore = pending
+        self._steam_options_done(
+            worker, progress, payload, launch_game, restore
+        )
+
+    def _on_steam_options_finished(self) -> None:
+        worker = self._steam_options_worker
+        if worker is not None:
+            self._steam_options_worker = None
+            worker.deleteLater()
+
+    def _steam_options_done(
+        self,
+        worker: SteamOptionsWorker,
+        progress: QProgressDialog,
+        payload: object,
+        launch_game: dict[str, Any] | None,
+        restore: bool,
+    ) -> None:
+        progress.close()
+        progress.deleteLater()
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            error = str(data.get("error", tr("Nieznany błąd konfiguracji Steam.")))
+            try:
+                QApplication.clipboard().setText(
+                    steam_launch_option(ensure_steam_wrapper())
+                )
+            except OSError:
+                pass
+            QMessageBox.warning(
+                self,
+                tr("Steam wrapper"),
+                tr(
+                    "{error}\n\nPoprawna opcja uruchamiania została skopiowana "
+                    "do schowka.",
+                    error=error,
+                ),
+            )
+            if launch_game is not None:
+                self._launch_steam_client(launch_game)
+            return
+        if restore:
+            QMessageBox.information(
+                self,
+                tr("Steam backup"),
+                tr(
+                    "Przywrócono backup:\n{path}\n\nUruchom Steam ponownie.",
+                    path=data.get("restored", ""),
+                ),
+            )
+            self.toast(tr("Backup localconfig.vdf przywrócony."))
+            return
+        updated = int(data.get("updated", 0))
+        skipped = int(data.get("skipped", 0))
+        unchanged = int(data.get("unchanged", 0))
+        message = (
+            f"Steam: dopisano {updated}, bez zmian {unchanged}, "
+            f"pominięto {skipped}."
+        )
+        self.toast(message)
+        if launch_game is not None:
+            self._launch_steam_client(launch_game)
+        else:
+            QMessageBox.information(
+                self,
+                tr("Steam wrapper"),
+                tr(
+                    "{message}\n\nUruchom Steam ponownie, aby zobaczyć zmiany.",
+                    message=message,
+                ),
+            )
+
+    def apply_steam_wrapper_all(self) -> None:
+        games = [
+            game
+            for game in self.db.list_games()
+            if game.get("is_steam") and str(game.get("steam_appid", "")).strip()
+        ]
+        if not games:
+            QMessageBox.information(
+                self, tr("Steam wrapper"), tr("Brak gier Steam w bibliotece.")
+            )
+            return
+        try:
+            wrapper = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Zastosuj wrapper do wszystkich gier Steam"),
+            tr(
+                "Zaktualizować LaunchOptions dla {count} gier Steam?\n\n"
+                "Steam zostanie zamknięty, plik localconfig.vdf zostanie "
+                "zabezpieczony backupem, a następnie Steam trzeba będzie "
+                "uruchomić ponownie. Kontynuować?",
+                count=len(games),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_steam_options_worker(
+            [str(game["steam_appid"]) for game in games],
+            wrapper,
+            title=tr("Steam wrapper — wszystkie gry"),
+        )
+
+    def repair_steam_options(self, game_id: int) -> None:
+        game = self.db.get_game(int(game_id))
+        if not game or not game.get("is_steam"):
+            return
+        appid = str(game.get("steam_appid", "")).strip()
+        if not appid:
+            return
+        try:
+            wrapper = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        action = steam_launch_action_for_appid(appid, wrapper)
+        if action == "ok":
+            QMessageBox.information(
+                self,
+                tr("Steam wrapper"),
+                tr("LaunchOptions tej gry są już poprawne."),
+            )
+            return
+        if action == "complex":
+            QMessageBox.information(
+                self,
+                tr("Steam wrapper"),
+                tr("Ta gra ma złożone LaunchOptions z %command%. "
+                "Nie nadpisuję ich automatycznie."),
+            )
+            return
+        if steam_is_running():
+            answer = QMessageBox.question(
+                self,
+                tr("Zamknąć Steam?"),
+                tr("Aby naprawić LaunchOptions, Steam musi zostać zamknięty. "
+                "Kontynuować?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._start_steam_options_worker(
+            [appid],
+            wrapper,
+            title=tr("Naprawa Steam — {name}", name=game.get("name", appid)),
+        )
+
+    def restore_steam_backup(self) -> None:
+        account = steam_account()
+        backup = latest_steam_backup(account.account_id if account else None)
+        if backup is None:
+            QMessageBox.information(
+                self,
+                tr("Steam backup"),
+                tr(
+                    "Brak backupu localconfig.vdf w {path}.",
+                    path=db.CONFIG_DIR / "steam-backups",
+                ),
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Przywrócić backup Steam?"),
+            tr(
+                "Przywrócić plik:\n{path}\n\n"
+                "Bieżące LaunchOptions zostaną nadpisane. Steam musi być zamknięty. "
+                "Kontynuować?",
+                path=backup,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            wrapper = ensure_steam_wrapper()
+        except OSError as exc:
+            QMessageBox.warning(self, tr("Steam wrapper"), str(exc))
+            return
+        self._start_steam_options_worker(
+            [], wrapper, restore=True, title="Steam backup"
+        )
+
+    def _minimize_after_launch(self, game: dict[str, Any]) -> None:
+        if not self.db.get_bool("ghost_mode", True):
+            return
+        self._was_window_visible = self.isVisible()
+        self._was_maximized = self.isMaximized()
+        self._minimized_for_game = True
+        self.showMinimized()
+        self._refresh_tray_menu()
+        if self.tray is not None:
+            self.tray.showMessage(
+                tr("{app} // gra działa", app=APP_NAME),
+                tr(
+                    "{name} uruchomiona. Boostlayer zminimalizowany — "
+                    "Ctrl+Alt+S przywraca okno.",
+                    name=game.get("name", tr("Gra")),
+                ),
+                QSystemTrayIcon.MessageIcon.Information,
+                2600,
+            )
+
+    def _on_game_started(self, process: QProcess, game: dict[str, Any]) -> None:
+        if process is not self._active_process:
+            return
+        self.status_label.setText(tr("GRA DZIAŁA // {name}", name=game.get("name", "")))
+        self._refresh_tray_menu()
+        self._minimize_after_launch(game)
+
+    def _on_game_finished(
+        self, process: QProcess, exit_code: int, _exit_status: QProcess.ExitStatus
+    ) -> None:
+        if process is not self._active_process:
+            return
+        game = self._active_game or {}
+        self._active_process = None
+        self._active_game = None
+        process.deleteLater()
+        if self._minimized_for_game:
+            self._minimized_for_game = False
+            if self._was_window_visible:
+                self.show_window()
+                if self._was_maximized:
+                    self.showMaximized()
+        debug = self.db.get_bool("debug_logging", False)
+        suffix = tr(" Log: {path}", path=LAST_RUN_LOG) if debug else ""
+        self.status_label.setText(
+            tr(
+                "ZAKOŃCZONO // {name} // kod {code}.{suffix}",
+                name=game.get("name", tr("gra")),
+                code=exit_code,
+                suffix=suffix,
+            )
+        )
+        self._update_sidebar_state()
+        self._refresh_tray_menu()
+        if self.tray is not None:
+            self.tray.showMessage(
+                tr("{app} // koniec gry", app=APP_NAME),
+                tr(
+                    "{name} zakończona (kod {code}).",
+                    name=game.get("name", tr("Gra")),
+                    code=exit_code,
+                ),
+                QSystemTrayIcon.MessageIcon.Information,
+                2600,
+            )
+
+    def _on_game_error(self, process: QProcess, error: QProcess.ProcessError) -> None:
+        if process is not self._active_process:
+            return
+        if error != QProcess.ProcessError.FailedToStart:
+            self.status_label.setText(tr("BŁĄD PROCESU // {error}", error=error.name))
+            return
+        self._active_process = None
+        self._active_game = None
+        self._minimized_for_game = False
+        process.deleteLater()
+        self.show_window()
+        self._update_sidebar_state()
+        self._refresh_tray_menu()
+        QMessageBox.warning(
+            self,
+            tr("Błąd uruchamiania"),
+            tr("Nie udało się uruchomić launcher.sh. Sprawdź uprawnienia i log."),
+        )
+
+    def stop_game(self) -> None:
+        process = self._active_process
+        if process is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Zakończ grę"),
+            tr("Wysłać SIGTERM do procesu gry?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        process.terminate()
+        self.status_label.setText(tr("ZATRZYMYWANIE GRY..."))
+
+    # -------------------------------------------------------------- maintenance
+    def show_last_run_log(self) -> None:
+        if not LAST_RUN_LOG.is_file():
+            QMessageBox.information(
+                self,
+                tr("Brak logu"),
+                tr("Włącz „Debug: zapis do last_run.log” w Ustawieniach i uruchom grę."),
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(LAST_RUN_LOG)))
+
+    def _open_config_dir(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_dir())))
+
+    def clear_cache_for_game(self, game_id: int) -> None:
+        removed = self.db.clear_shader_cache(game_id)
+        self.toast(tr("Shader cache: usunięto {count} katalogów.", count=removed))
+        QMessageBox.information(
+            self,
+            tr("Shader cache"),
+            tr(
+                "Usunięto {count} znanych katalogów cache dla wybranej gry.\n"
+                "Dane gry i WINEPREFIX pozostały nienaruszone.",
+                count=removed,
+            ),
+        )
+
+    def clear_cache_dialog(self) -> None:
+        games = self.db.list_games()
+        labels = [tr("Wszystkie gry (globalnie)")] + [str(game["name"]) for game in games]
+        choice, accepted = QInputDialog.getItem(
+            self,
+            tr("Wyczyść shader cache"),
+            tr("Zakres:"),
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        removed = 0
+        if choice == labels[0]:
+            removed += self.db.clear_shader_cache(None)
+            for game in games:
+                removed += self.db.clear_shader_cache(int(game["id"]))
+        else:
+            index = labels.index(choice) - 1
+            removed = self.db.clear_shader_cache(int(games[index]["id"]))
+        self.toast(tr("Shader cache: usunięto {count} katalogów.", count=removed))
+        QMessageBox.information(
+            self,
+            tr("Shader cache"),
+            tr(
+                "Usunięto {count} katalogów cache.\n"
+                "Następne uruchomienie skompiluje shadery od nowa.",
+                count=removed,
+            ),
+        )
+
+    def _about(self) -> None:
+        QMessageBox.about(
+            self,
+            tr("O {app}", app=APP_NAME),
+            tr(
+                "<h2 style='color:#00E5FF'>{app} {version}</h2>"
+                "<p>Minimalistyczny launcher standalone i wrapper Wine/Proton.</p>"
+                "<p><b>Runtime:</b> Python stdlib + PyQt6<br>"
+                "<b>Dane:</b> SQLite3<br>"
+                "<b>Łańcuch:</b> GameMode → MangoHud → Gamescope → Wine → Gra</p>"
+                "<p style='color:#71858F'>Po starcie gry Boostlayer minimalizuje "
+                "się do paska zadań i pozostaje w pamięci. Ctrl+Alt+S przywraca "
+                "lub chowa okno.</p>",
+                app=APP_NAME,
+                version=APP_VERSION,
+            ),
+        )
+
+    # ------------------------------------------------------------------ window
+    def _restore_geometry(self) -> None:
+        encoded = self.db.get_setting("window_geometry")
+        restored = False
+        if encoded:
+            try:
+                restored = self.restoreGeometry(
+                    QByteArray.fromBase64(encoded.encode("ascii"))
+                )
+            except Exception:
+                restored = False
+        if not restored:
+            self.resize(1320, 830)
+
+    def _save_geometry(self) -> None:
+        try:
+            encoded = bytes(self.saveGeometry().toBase64()).decode("ascii")
+            self.db.set_setting("window_geometry", encoded)
         except Exception:
             pass
 
-    top = None
+    def quit_app(self) -> None:
+        if (
+            self._steam_pending is not None
+            or (
+                self._steam_options_worker is not None
+                and self._steam_options_worker.isRunning()
+            )
+        ):
+            QMessageBox.information(
+                self,
+                tr("Steam"),
+                tr("Trwa operacja na konfiguracji Steam. Poczekaj na jej zakończenie."),
+            )
+            return
+        if self._active_process is not None:
+            answer = QMessageBox.question(
+                self,
+                tr("Zakończ Boostlayer"),
+                tr("Gra nadal działa. Zakończyć proces gry i zamknąć launcher?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self._active_process.terminate()
+            if not self._active_process.waitForFinished(1600):
+                self._active_process.kill()
+        self._force_quit = True
+        self._save_geometry()
+        self.close()
+        QApplication.quit()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._save_geometry()
+        if (
+            self._steam_pending is not None
+            or (
+                self._steam_options_worker is not None
+                and self._steam_options_worker.isRunning()
+            )
+        ):
+            QMessageBox.information(
+                self,
+                tr("Steam"),
+                tr("Trwa operacja na konfiguracji Steam. Poczekaj na jej zakończenie."),
+            )
+            event.ignore()
+            return
+        if self._force_quit:
+            event.accept()
+            return
+        if self._active_process is not None:
+            if self.tray is not None:
+                self.hide()
+                self.tray.showMessage(
+                    APP_NAME,
+                    tr("Gra działa. Launcher pozostaje w tray."),
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2500,
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    tr("Gra działa"),
+                    tr("Zakończ grę przed zamknięciem launchera."),
+                )
+            event.ignore()
+            return
+        if self.db.get_bool("close_to_tray", True) and self.tray is not None:
+            self.hide()
+            self.tray.showMessage(
+                APP_NAME,
+                tr("Boostlayer działa w tray."),
+                QSystemTrayIcon.MessageIcon.Information,
+                2200,
+            )
+            event.ignore()
+            return
+        event.accept()
+        QApplication.quit()
+
+
+def steam_exec_cli(argv: list[str]) -> int:
+    """CLI used by the generated Steam launch-options wrapper.
+
+    Syntax: boostlayer --steam-exec APPID -- <original %command% argv...>
+    The original command is executed unchanged if no matching library entry
+    exists, so a stale wrapper can never prevent a game from starting.
+    """
     try:
-        if isinstance(child, int):
-            from Xlib.xobject.drawable import Window
-            child = Window(d.display, child, d)
-        w = child
-        if w is not None and getattr(w, "id", 0) not in (0, X.NONE):
-            while True:
-                parent = w.query_tree().parent
-                if parent is None or getattr(parent, "id", 0) in (0, X.NONE):
-                    break
-                if parent.id == root.id:
-                    top = w
-                    break
-                w = parent
-    except Exception:
-        top = None
+        marker = argv.index("--steam-exec")
+        appid = argv[marker + 1].strip() if marker + 1 < len(argv) else ""
+        separator = argv.index("--", marker + 2)
+        command = argv[separator + 1 :]
+    except (ValueError, IndexError):
+        print(
+            "usage: boostlayer --steam-exec APPID -- COMMAND [ARG...]",
+            file=sys.stderr,
+        )
+        return 64
+    if not command:
+        print("Boostlayer: empty Steam command.", file=sys.stderr)
+        return 64
 
-    result = None
-    if top is not None:
-        client = _find_client_window(top)
-        result = int((client if client is not None else top).id)
+    database: Database | None = None
     try:
-        d.close()
-    except Exception:
-        pass
-    return result
-
-
-def _wine_exe_names():
-    """Sorted unique names of running Wine/Proton executables."""
-    names = set()
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            comm = _pid_comm(int(entry))
-            if comm and comm.lower().endswith(".exe"):
-                names.add(comm)
-    except Exception:
-        pass
-    return sorted(names)
-
-
-# ---------------------------------------------------------------------------
-# Fast X11 window capture (ctypes: libX11 / libXext / libXcomposite)
-#
-# python-xlib transfers XGetImage replies through its pure-Python socket
-# layer, which costs ~60 ms for a 1080p frame.  XShmGetImage writes the pixels
-# straight into shared memory (~3 ms), which is what keeps the overlay smooth.
-# ---------------------------------------------------------------------------
-
-_ZPIXMAP = 2
-_ALL_PLANES = 0xFFFFFFFF
-
-_X11_LIBS = None          # (libX11, libXext, libXcomposite, libc) or False
-_X11_ERROR = [0]          # last X error code seen by the handler
-_X11_PREV_HANDLER = None
-
-
-class _XImageStruct(ctypes.Structure):
-    _fields_ = [
-        ("width", ctypes.c_int),
-        ("height", ctypes.c_int),
-        ("xoffset", ctypes.c_int),
-        ("format", ctypes.c_int),
-        ("data", ctypes.c_void_p),
-        ("byte_order", ctypes.c_int),
-        ("bitmap_unit", ctypes.c_int),
-        ("bitmap_bit_order", ctypes.c_int),
-        ("bitmap_pad", ctypes.c_int),
-        ("depth", ctypes.c_int),
-        ("bytes_per_line", ctypes.c_int),
-        ("bits_per_pixel", ctypes.c_int),
-        ("red_mask", ctypes.c_ulong),
-        ("green_mask", ctypes.c_ulong),
-        ("blue_mask", ctypes.c_ulong),
-    ]
-
-
-class _XShmSegmentInfo(ctypes.Structure):
-    _fields_ = [
-        ("shmseg", ctypes.c_ulong),
-        ("shmid", ctypes.c_int),
-        ("shmaddr", ctypes.c_void_p),
-        ("readOnly", ctypes.c_int),
-    ]
-
-
-class _XWindowAttributes(ctypes.Structure):
-    _fields_ = [
-        ("x", ctypes.c_int),
-        ("y", ctypes.c_int),
-        ("width", ctypes.c_int),
-        ("height", ctypes.c_int),
-        ("border_width", ctypes.c_int),
-        ("depth", ctypes.c_int),
-        ("visual", ctypes.c_void_p),
-        ("root", ctypes.c_ulong),
-        ("class_", ctypes.c_int),
-        ("bit_gravity", ctypes.c_int),
-        ("win_gravity", ctypes.c_int),
-        ("backing_store", ctypes.c_int),
-        ("backing_planes", ctypes.c_ulong),
-        ("backing_pixel", ctypes.c_ulong),
-        ("save_under", ctypes.c_int),
-        ("colormap", ctypes.c_ulong),
-        ("map_installed", ctypes.c_int),
-        ("map_state", ctypes.c_int),
-        ("all_event_masks", ctypes.c_long),
-        ("your_event_mask", ctypes.c_long),
-        ("do_not_propagate_mask", ctypes.c_long),
-        ("override_redirect", ctypes.c_int),
-        ("screen", ctypes.c_void_p),
-    ]
-
-
-class _XErrorEvent(ctypes.Structure):
-    _fields_ = [
-        ("type", ctypes.c_int),
-        ("display", ctypes.c_void_p),
-        ("resourceid", ctypes.c_ulong),
-        ("serial", ctypes.c_ulong),
-        ("error_code", ctypes.c_ubyte),
-        ("request_code", ctypes.c_ubyte),
-        ("minor_code", ctypes.c_ubyte),
-    ]
-
-
-_XErrorHandlerType = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
-                                      ctypes.POINTER(_XErrorEvent))
-
-
-@_XErrorHandlerType
-def _x11_error_handler(dpy, event):
-    """Record async X errors instead of letting Xlib abort the process."""
-    try:
-        _X11_ERROR[0] = event.contents.error_code
-    except Exception:
-        _X11_ERROR[0] = -1
-    prev = _X11_PREV_HANDLER
-    if prev is not None:
+        database = Database()
+        game = database.find_steam_game(appid) if appid else None
+        if not game:
+            database.close()
+            database = None
+            os.execvp(command[0], command)
+        runtime = write_runtime_file(
+            database,
+            game,
+            command,
+            direct=True,
+            use_prefix=False,
+        )
+        launcher = ensure_launcher()
+        database.close()
+        database = None
+        os.execv("/bin/sh", ["/bin/sh", str(launcher), str(runtime)])
+    except Exception as exc:
+        log.error("Steam wrapper failed: %s", exc)
+        if database is not None:
+            database.close()
+        # Last-resort compatibility: run the game without Boostlayer options.
         try:
-            return prev(dpy, event)
-        except Exception:
-            return 0
+            os.execvp(command[0], command)
+        except OSError:
+            print(f"Boostlayer: cannot execute {command[0]}: {exc}", file=sys.stderr)
+            return 127
     return 0
 
 
-def _x11_load():
-    """Load and prototype the X11 libraries once.  True on success."""
-    global _X11_LIBS, _X11_PREV_HANDLER
-    if _X11_LIBS is not None:
-        return bool(_X11_LIBS)
-    try:
-        import ctypes.util
-        def _lib(name, fallback):
-            return ctypes.CDLL(ctypes.util.find_library(name) or fallback)
-        libx11 = _lib("X11", "libX11.so.6")
-        libxext = _lib("Xext", "libXext.so.6")
-        libxc = _lib("Xcomposite", "libXcomposite.so.1")
-        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6",
-                           use_errno=True)
-    except OSError as e:
-        _log("X11 libraries unavailable: %r" % (e,))
-        _X11_LIBS = False
-        return False
-
-    libx11.XOpenDisplay.restype = ctypes.c_void_p
-    libx11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-    libx11.XCloseDisplay.argtypes = [ctypes.c_void_p]
-    libx11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    libx11.XSetErrorHandler.restype = ctypes.c_void_p
-    libx11.XSetErrorHandler.argtypes = [ctypes.c_void_p]
-    libx11.XGetWindowAttributes.restype = ctypes.c_int
-    libx11.XGetWindowAttributes.argtypes = [
-        ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_XWindowAttributes)]
-    libx11.XGetImage.restype = ctypes.c_void_p
-    libx11.XGetImage.argtypes = [
-        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
-        ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_int]
-    libx11.XDestroyImage.argtypes = [ctypes.c_void_p]
-    libx11.XFreePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-
-    libxc.XCompositeRedirectWindow.argtypes = [
-        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int]
-    libxc.XCompositeUnredirectWindow.argtypes = [
-        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int]
-    libxc.XCompositeNameWindowPixmap.restype = ctypes.c_ulong
-    libxc.XCompositeNameWindowPixmap.argtypes = [ctypes.c_void_p,
-                                                 ctypes.c_ulong]
-
-    libxext.XShmQueryExtension.restype = ctypes.c_int
-    libxext.XShmQueryExtension.argtypes = [ctypes.c_void_p]
-    libxext.XShmCreateImage.restype = ctypes.c_void_p
-    libxext.XShmCreateImage.argtypes = [
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_int,
-        ctypes.c_void_p, ctypes.POINTER(_XShmSegmentInfo),
-        ctypes.c_uint, ctypes.c_uint]
-    libxext.XShmAttach.restype = ctypes.c_int
-    libxext.XShmAttach.argtypes = [ctypes.c_void_p,
-                                   ctypes.POINTER(_XShmSegmentInfo)]
-    libxext.XShmDetach.restype = ctypes.c_int
-    libxext.XShmDetach.argtypes = [ctypes.c_void_p,
-                                   ctypes.POINTER(_XShmSegmentInfo)]
-    libxext.XShmGetImage.restype = ctypes.c_int
-    libxext.XShmGetImage.argtypes = [
-        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
-        ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
-
-    libc.shmget.restype = ctypes.c_int
-    libc.shmget.argtypes = [ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
-    libc.shmat.restype = ctypes.c_void_p
-    libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-    libc.shmdt.argtypes = [ctypes.c_void_p]
-    libc.shmctl.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
-
-    prev = libx11.XSetErrorHandler(
-        ctypes.cast(_x11_error_handler, ctypes.c_void_p))
-    if prev:
-        _X11_PREV_HANDLER = ctypes.cast(prev, _XErrorHandlerType)
-
-    _X11_LIBS = (libx11, libxext, libxc, libc)
-    return True
-
-
-class XCompositeCapture:
-    """Capture a specific X11 window through the Composite extension.
-
-    XCompositeRedirectWindow keeps the window's content in an off-screen
-    buffer, so it can be read even when the always-on-top overlay covers it.
-    Pixels are pulled with MIT-SHM (XShmGetImage) and converted in place into
-    a reused BGRA buffer, so steady-state capture allocates nothing."""
-
-    def __init__(self, window_id):
-        self.window_id = int(window_id)
-        self._ok = False
-        self._dpy = None
-        self._pixmap = 0
-        self._shm_img = None
-        self._shm = None
-        self._shm_id = -1
-        self._shm_addr = None
-        self._shm_size = 0
-        self._shm_bpl = 0
-        self._shm_ok = False
-        self._w = 0
-        self._h = 0
-        self._out = None
-        self._bpp = 4
-        self._r_byte = 2
-        self._g_byte = 1
-        self._b_byte = 0
-        self._fast = True
-
-        if not _x11_load():
-            return
-        libx11 = _X11_LIBS[0]
-        try:
-            dpy = libx11.XOpenDisplay(None)
-        except Exception:
-            dpy = None
-        if not dpy:
-            _log("XComposite: cannot open X display")
-            return
-        self._dpy = dpy
-        if not self._redirect():
-            self.release()
-
-    # -- setup ------------------------------------------------------------
-    def _redirect(self):
-        libx11, _xext, libxc, _libc = _X11_LIBS
-        _X11_ERROR[0] = 0
-        try:
-            libxc.XCompositeRedirectWindow(self._dpy, self.window_id, 0)
-            libx11.XSync(self._dpy, 0)
-        except Exception as e:
-            _log("XComposite redirect failed for %d: %r"
-                 % (self.window_id, e))
-            return False
-        if _X11_ERROR[0]:
-            _log("XComposite redirect refused for window %d (X error %d)"
-                 % (self.window_id, _X11_ERROR[0]))
-            return False
-        attrs = _XWindowAttributes()
-        _X11_ERROR[0] = 0
-        if not libx11.XGetWindowAttributes(self._dpy, self.window_id,
-                                           ctypes.byref(attrs)):
-            return False
-        if attrs.width <= 0 or attrs.height <= 0:
-            return False
-        self._w, self._h = int(attrs.width), int(attrs.height)
-        if not self._make_target():
-            return False
-        self._ok = True
-        return True
-
-    def _make_target(self):
-        """(Re)name the window pixmap and (re)allocate the capture buffers."""
-        libx11, _xext, libxc, _libc = _X11_LIBS
-        self._free_pixmap()
-        self._free_shm()
-        _X11_ERROR[0] = 0
-        pixmap = libxc.XCompositeNameWindowPixmap(self._dpy, self.window_id)
-        if _X11_ERROR[0] or not pixmap:
-            return False
-        self._pixmap = int(pixmap)
-        self._out = np.empty((self._h, self._w, 4), dtype=np.uint8)
-        self._setup_shm()
-        return True
-
-    def _setup_shm(self):
-        libx11, libxext, _libxc, libc = _X11_LIBS
-        try:
-            if not libxext.XShmQueryExtension(self._dpy):
-                return False
-            attrs = _XWindowAttributes()
-            _X11_ERROR[0] = 0
-            if not libx11.XGetWindowAttributes(self._dpy, self.window_id,
-                                               ctypes.byref(attrs)):
-                return False
-            shm = _XShmSegmentInfo()
-            img = libxext.XShmCreateImage(
-                self._dpy, attrs.visual, attrs.depth, _ZPIXMAP, None,
-                ctypes.byref(shm), self._w, self._h)
-            if not img:
-                return False
-            xi = ctypes.cast(img, ctypes.POINTER(_XImageStruct)).contents
-            size = int(xi.bytes_per_line) * int(xi.height)
-            if size <= 0:
-                libx11.XDestroyImage(img)
-                return False
-            shmid = libc.shmget(0, size, 0o600 | 0o1000)   # IPC_PRIVATE|CREAT
-            if shmid < 0:
-                libx11.XDestroyImage(img)
-                return False
-            addr = libc.shmat(shmid, None, 0)
-            if not addr or addr == ctypes.c_void_p(-1).value:
-                libc.shmctl(shmid, 0, None)
-                libx11.XDestroyImage(img)
-                return False
-            shm.shmid = shmid
-            shm.shmaddr = addr
-            shm.readOnly = 0
-            xi.data = addr
-            _X11_ERROR[0] = 0
-            if not libxext.XShmAttach(self._dpy, ctypes.byref(shm)):
-                libc.shmdt(addr)
-                libc.shmctl(shmid, 0, None)
-                libx11.XDestroyImage(img)
-                return False
-            libx11.XSync(self._dpy, 0)
-            if _X11_ERROR[0]:
-                libxext.XShmDetach(self._dpy, ctypes.byref(shm))
-                libc.shmdt(addr)
-                libc.shmctl(shmid, 0, None)
-                libx11.XDestroyImage(img)
-                return False
-            self._shm = shm
-            self._shm_img = img
-            self._shm_id = shmid
-            self._shm_addr = addr
-            self._shm_size = size
-            self._shm_bpl = int(xi.bytes_per_line)
-            self._shm_ok = True
-            self._read_format(xi)
-            return True
-        except Exception as e:
-            _log("XShm setup failed: %r" % (e,))
-            return False
-
-    def _read_format(self, xi):
-        self._bpp = max(1, int(xi.bits_per_pixel) // 8)
-        self._r_byte = _mask_to_byte(xi.red_mask)
-        self._g_byte = _mask_to_byte(xi.green_mask)
-        self._b_byte = _mask_to_byte(xi.blue_mask)
-        self._fast = (self._bpp == 4 and self._r_byte == 2 and
-                      self._g_byte == 1 and self._b_byte == 0)
-
-    # -- grabbing ---------------------------------------------------------
-    def grab(self):
-        if not self._ok or not self._dpy:
-            return None
-        libx11 = _X11_LIBS[0]
-        # Window resized? Then the named pixmap and the SHM image are stale.
-        attrs = _XWindowAttributes()
-        _X11_ERROR[0] = 0
-        if not libx11.XGetWindowAttributes(self._dpy, self.window_id,
-                                           ctypes.byref(attrs)):
-            return None
-        if attrs.width != self._w or attrs.height != self._h:
-            if attrs.width <= 0 or attrs.height <= 0:
-                return None
-            self._w, self._h = int(attrs.width), int(attrs.height)
-            if not self._make_target():
-                return None
-        return self._read()
-
-    def _read(self):
-        libx11, libxext, _libxc, _libc = _X11_LIBS
-        if self._shm_ok:
-            _X11_ERROR[0] = 0
-            ok = libxext.XShmGetImage(self._dpy, self._pixmap, self._shm_img,
-                                      0, 0, _ALL_PLANES)
-            if ok and not _X11_ERROR[0]:
-                buf = (ctypes.c_ubyte * self._shm_size).from_address(
-                    self._shm_addr)
-                raw = np.frombuffer(buf, dtype=np.uint8)
-                return self._convert(raw, self._h, self._shm_bpl)
-            # SHM stopped working (segment detached, window gone): fall back.
-            _log("XShmGetImage failed, using XGetImage fallback")
-            self._free_shm()
-        _X11_ERROR[0] = 0
-        ptr = libx11.XGetImage(self._dpy, self._pixmap, 0, 0, self._w,
-                               self._h, _ALL_PLANES, _ZPIXMAP)
-        if not ptr:
-            return None
-        try:
-            xi = ctypes.cast(ptr, ctypes.POINTER(_XImageStruct)).contents
-            size = int(xi.bytes_per_line) * int(xi.height)
-            if size <= 0:
-                return None
-            self._read_format(xi)
-            buf = (ctypes.c_ubyte * size).from_address(xi.data)
-            raw = np.frombuffer(buf, dtype=np.uint8)
-            return self._convert(raw, int(xi.height), int(xi.bytes_per_line))
-        finally:
-            libx11.XDestroyImage(ptr)
-
-    def _convert(self, raw, h, bpl):
-        w = self._w
-        out = self._out
-        if out is None or out.shape[0] != h or out.shape[1] != w:
-            out = np.empty((h, w, 4), dtype=np.uint8)
-            self._out = out
-        bpp = self._bpp
-        if bpl < w * bpp or raw.size < bpl * h:
-            return None
-        if self._fast:
-            src = raw.reshape(h, bpl)[:, :w * 4].reshape(h, w, 4)
-            np.copyto(out, src)
-        else:
-            src = raw.reshape(h, bpl)[:, :w * bpp].reshape(h, w, bpp)
-            bb = min(self._b_byte, bpp - 1)
-            gb = min(self._g_byte, bpp - 1)
-            rb = min(self._r_byte, bpp - 1)
-            out[:, :, 0] = src[:, :, bb]
-            out[:, :, 1] = src[:, :, gb]
-            out[:, :, 2] = src[:, :, rb]
-        out[:, :, 3] = 255
-        return out
-
-    # -- teardown ---------------------------------------------------------
-    def _free_shm(self):
-        if self._shm_img is None and self._shm is None:
-            return
-        libx11, libxext, _libxc, libc = _X11_LIBS
-        try:
-            if self._shm is not None and self._dpy:
-                libxext.XShmDetach(self._dpy, ctypes.byref(self._shm))
-        except Exception:
-            pass
-        try:
-            if self._shm_img is not None:
-                libx11.XDestroyImage(self._shm_img)
-        except Exception:
-            pass
-        try:
-            if self._shm_addr:
-                libc.shmdt(self._shm_addr)
-        except Exception:
-            pass
-        try:
-            if self._shm_id >= 0:
-                libc.shmctl(self._shm_id, 0, None)   # IPC_RMID
-        except Exception:
-            pass
-        self._shm_img = None
-        self._shm = None
-        self._shm_addr = None
-        self._shm_id = -1
-        self._shm_size = 0
-        self._shm_ok = False
-
-    def _free_pixmap(self):
-        if self._pixmap and self._dpy:
-            try:
-                _X11_LIBS[0].XFreePixmap(self._dpy, self._pixmap)
-            except Exception:
-                pass
-        self._pixmap = 0
-
-    def release(self):
-        self._ok = False
-        self._free_shm()
-        self._free_pixmap()
-        if self._dpy:
-            try:
-                _X11_LIBS[2].XCompositeUnredirectWindow(self._dpy,
-                                                        self.window_id, 0)
-                _X11_LIBS[0].XSync(self._dpy, 0)
-            except Exception:
-                pass
-            try:
-                _X11_LIBS[0].XCloseDisplay(self._dpy)
-            except Exception:
-                pass
-            self._dpy = None
-
-
-class CaptureThread(threading.Thread):
-    def __init__(self, state, stats_collector=None):
-        super().__init__(name="BoostLayer-Capture", daemon=True)
-        self.state = state
-        self.stats = stats_collector
-        self.display = detect_display_server()
-        self._sct = None
-        self._monitor = None
-        self._xcomp = None
-        self._active_win_id = None
-        self._last_active_refresh = 0.0
-        self._full_win_id = None
-        self._last_full_refresh = 0.0
-        self._bad_windows = set()
-        self._mss_warned = False
-        self._seq = 0
-        self._last_window_refresh = 0.0
-        self._window_region = None
-        self._active_event = threading.Event()
-        self._last_grim_ts = 0.0
-
-    def _open(self):
-        # mss is used for fullscreen capture; XComposite capture does not
-        # require it, so the thread still runs if mss is unavailable.
-        self._sct = None
-        self._monitor = None
-        if HAS_MSS:
-            # mss 10 renamed mss.mss() to mss.MSS(); prefer the new API.
-            factory = getattr(mss, "MSS", None) or mss.mss
-            self._sct = factory()
-            self._monitor = self._sct.monitors[1]  # primary monitor
-        return True
-
-    def _grab_frame(self):
-        """Dispatch to the appropriate capture backend.
-
-        On X11 every target ultimately captures a *window* off-screen via
-        XComposite.  Grabbing the monitor while the always-on-top overlay is
-        visible would capture the overlay itself, producing an endless mirror
-        (duplicated panel, runaway GPU load) — so ``mss`` is only used when the
-        overlay is provably not on the captured monitor.
-        """
-        target = self.state.capture_target
-        win_id = self.state.capture_window_id
-
-        if target == "window":
-            if win_id:
-                arr = self._grab_window(win_id)
-                if arr is not None:
-                    return arr
-            return self._grab_safe_mss()
-
-        if target == "active":
-            now = time.time()
-            if now - self._last_active_refresh > 0.5:
-                self._last_active_refresh = now
-                new_id = active_window_id()
-                # Ignore BoostLayer's own windows (the GUI or the overlay),
-                # otherwise we would capture ourselves and show a mirror.
-                if new_id and not self._is_own_window(new_id):
-                    self._active_win_id = new_id
-            if self._active_win_id:
-                arr = self._grab_window(self._active_win_id)
-                if arr is not None:
-                    return arr
-                self._active_win_id = None
-            # Nothing foreign has been focused yet (e.g. scaling was started
-            # from the GUI): capture the topmost window on the monitor as a
-            # safe stand-in instead of giving up.
-            arr = self._grab_topmost()
-            if arr is not None:
-                return arr
-            return self._grab_safe_mss()
-
-        # "fullscreen": capture the topmost window on the selected monitor.
-        arr = self._grab_topmost()
-        if arr is not None:
-            return arr
-        if self.display == "x11":
-            return self._grab_safe_mss()
-
-        arr = self._grab_grim()
-        if arr is not None:
-            return arr
-        return self._grab_safe_mss()
-
-    def _grab_topmost(self):
-        """Topmost window on the capture monitor (X11 only, never the overlay)."""
-        if self.display != "x11":
-            return None
-        now = time.time()
-        if not self._full_win_id or now - self._last_full_refresh > 1.0:
-            self._last_full_refresh = now
-            self._full_win_id = self._topmost_window_on_monitor()
-        if not self._full_win_id:
-            return None
-        arr = self._grab_window(self._full_win_id)
-        if arr is not None:
-            return arr
-        # Uncompositable window — never try it again.
-        if len(self._bad_windows) < 64:
-            self._bad_windows.add(self._full_win_id)
-        self._full_win_id = None
-        return None
-
-    def _grab_window(self, win_id):
-        """Capture a window via XComposite (Wayland: fall back to grim)."""
-        arr = self._grab_xcomp(win_id)
-        if arr is None and self.display == "wayland":
-            arr = self._grab_grim()
-        return arr
-
-    # -- monitor geometry / feedback-loop protection -----------------------
-    def _capture_rect(self):
-        """The mss monitor rect that would be captured by full-screen mode."""
-        if self._sct is None:
-            return None
-        try:
-            mons = self._sct.monitors
-            idx = max(1, min(int(self.state.capture_monitor), len(mons) - 1))
-            return mons[idx]
-        except Exception:
-            return None
-
-    def _overlay_covers_capture(self):
-        """True when the overlay sits on the monitor full-screen mode would
-        grab — i.e. when using mss would capture the overlay itself."""
-        rect = self._capture_rect()
-        ov = getattr(self.state, "overlay_rect", None)
-        if not ov:
-            return False
-        if not rect:
-            # No monitor geometry (typical on Wayland): a full-output grab
-            # inevitably includes the visible overlay.
-            return True
-        try:
-            rx, ry, rw, rh = rect["left"], rect["top"], rect["width"], rect["height"]
-            ox, oy, ow, oh = ov
-        except Exception:
-            return False
-        ix = max(0, min(rx + rw, ox + ow) - max(rx, ox))
-        iy = max(0, min(ry + rh, oy + oh) - max(ry, oy))
-        return (ix * iy) > 0
-
-    def _grab_safe_mss(self):
-        """Full-screen grab that refuses to capture the overlay itself."""
-        if self._sct is None:
-            return None
-        if self._overlay_covers_capture():
-            if not self._mss_warned:
-                self._mss_warned = True
-                _log("fullscreen grab skipped: overlay covers the captured "
-                     "monitor (choose another window/monitor)")
-            return None
-        return self._grab_mss()
-
-    def _topmost_window_on_monitor(self):
-        """Topmost non-BoostLayer, non-panel window covering the capture
-        monitor.  Used as the safe target for full-screen mode."""
-        rect = self._capture_rect()
-        if rect is None:
-            return None
-        try:
-            from Xlib import display as _xd, X
-        except ImportError:
-            return None
-        try:
-            d = _xd.Display()
-        except Exception:
-            return None
-        result = None
-        try:
-            root = d.screen().root
-            try:
-                children = root.query_tree().children
-            except Exception:
-                children = []
-            pid_atom = d.intern_atom("_NET_WM_PID")
-            type_atom = d.intern_atom("_NET_WM_WINDOW_TYPE")
-            skip_types = {
-                d.intern_atom("_NET_WM_WINDOW_TYPE_DOCK"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_DESKTOP"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_TOOLBAR"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_MENU"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_DROPDOWN_MENU"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_POPUP_MENU"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_TOOLTIP"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_NOTIFICATION"),
-                d.intern_atom("_NET_WM_WINDOW_TYPE_SPLASH"),
-            }
-            mono_area = max(1, rect["width"] * rect["height"])
-            # XQueryTree returns children bottom-to-top: walk topmost first.
-            for w in reversed(children):
-                if int(w.id) in self._bad_windows:
-                    continue
-                try:
-                    if w.get_attributes().map_state != X.IsViewable:
-                        continue
-                    geo = w.get_geometry()
-                except Exception:
-                    continue
-                # Direct children of root: geometry is already in root coords.
-                x, y, ww, hh = geo.x, geo.y, geo.width, geo.height
-                if ww < 200 or hh < 120:
-                    continue
-                ix = max(0, min(x + ww, rect["left"] + rect["width"]) -
-                         max(x, rect["left"]))
-                iy = max(0, min(y + hh, rect["top"] + rect["height"]) -
-                         max(y, rect["top"]))
-                if ix * iy < mono_area * 0.6:
-                    continue          # too small to represent the monitor
-                try:
-                    prop = w.get_full_property(type_atom, 0)
-                    if prop and prop.value is not None:
-                        v = prop.value
-                        first = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
-                        if first in skip_types:
-                            continue
-                except Exception:
-                    pass
-                try:
-                    prop = w.get_full_property(pid_atom, 0)
-                    if prop and prop.value is not None:
-                        v = prop.value
-                        pid = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
-                        if pid == os.getpid():
-                            continue
-                except Exception:
-                    pass
-                result = int(w.id)
-                break
-        except Exception:
-            result = None
-        finally:
-            try:
-                d.close()
-            except Exception:
-                pass
-        return result
-
-    @staticmethod
-    def _is_own_window(wid):
-        """True if the window belongs to this process (BoostLayer itself)."""
-        try:
-            from Xlib import display as _xd
-        except ImportError:
-            return False
-        try:
-            d = _xd.Display()
-        except Exception:
-            return False
-        try:
-            w = d.create_resource_object("window", int(wid))
-            prop = w.get_full_property(d.intern_atom("_NET_WM_PID"), 0)
-            if prop and prop.value is not None:
-                v = prop.value
-                pid = int(v[0]) if isinstance(v, (list, tuple)) else int(v)
-                return pid == os.getpid()
-        except Exception:
-            return False
-        finally:
-            try:
-                d.close()
-            except Exception:
-                pass
-        return False
-
-    def _grab_mss(self):
-        mons = self._sct.monitors
-        idx = max(1, min(int(self.state.capture_monitor), len(mons) - 1))
-        shot = self._sct.grab(mons[idx])
-        w = shot.width
-        h = shot.height
-        return np.frombuffer(shot.raw, dtype=np.uint8).reshape(h, w, 4)
-
-    def _grab_xcomp(self, win_id):
-        if self._xcomp is None or self._xcomp.window_id != win_id:
-            if self._xcomp is not None:
-                self._xcomp.release()
-            self._xcomp = XCompositeCapture(win_id)
-        return self._xcomp.grab()
-
-    def _grab_grim(self):
-        """Wayland-native fallback: capture the focused output via 'grim'
-        (which talks to wlr-screencopy / the xdg-desktop-portal underneath)."""
-        if not shutil.which("grim"):
-            return None
-        # grim captures the composited output, so it would include our own
-        # overlay when it is on the captured monitor (mirror feedback loop).
-        if self._overlay_covers_capture():
-            if not self._mss_warned:
-                self._mss_warned = True
-                _log("grim capture skipped: overlay covers the captured output")
-            return None
-        # Rate-limit: grim is a one-shot screencopy, not a stream.
-        now = time.time()
-        if now - self._last_grim_ts < 1.0 / 15.0:
-            return None
-        try:
-            out = subprocess.run(
-                ["grim", "-"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                timeout=2,
-            ).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if not out:
-            return None
-        self._last_grim_ts = now
-        return _decode_png(out)
-
-    def run(self):
-        gc.disable()  # no GC pauses in the hot capture loop
-        if not self._open():
-            return
-        try:
-            while self.state.running.is_set():
-                if not self.state.scaling_active:
-                    self._active_event.clear()
-                    time.sleep(0.05)
-                    continue
-                self._active_event.set()
-                arr = None
-                try:
-                    arr = self._grab_frame()
-                except Exception:
-                    arr = None
-                if arr is None:
-                    time.sleep(0.02)
-                    continue
-                self._seq += 1
-                self.state.put_frame(arr, self._seq, time.time())
-                if self.stats is not None:
-                    self.stats.bump_capture()
-                delay = self.state.capture_delay_ms
-                if delay > 0:
-                    time.sleep(delay / 1000.0)
-        finally:
-            if self._xcomp is not None:
-                self._xcomp.release()
-            if self._sct is not None:
-                try:
-                    self._sct.close()
-                except Exception:
-                    pass
-            gc.enable()
-
-
-# ---------------------------------------------------------------------------
-# Renderer helpers (pure functions, allocation-light)
-# ---------------------------------------------------------------------------
-def compute_rects(mode, aspect, custom_mult, in_w, in_h, out_w, out_h):
-    """Return (src_rect, dst_rect, scale) tuples (x, y, w, h)."""
-    if in_w <= 0 or in_h <= 0 or out_w <= 0 or out_h <= 0:
-        return (0, 0, in_w, in_h), (0, 0, out_w, out_h), 1.0
-
-    if mode == 1:  # Integer scaling
-        scale = float(max(1, int(min(out_w / in_w, out_h / in_h))))
-    elif aspect == "custom":
-        scale = max(0.1, float(custom_mult))
-    else:  # auto aspect ratio (fit)
-        scale = min(out_w / in_w, out_h / in_h)
-
-    scaled_w = in_w * scale
-    scaled_h = in_h * scale
-
-    if scaled_w <= out_w + 1e-3 and scaled_h <= out_h + 1e-3:
-        dw = max(1, int(round(scaled_w)))
-        dh = max(1, int(round(scaled_h)))
-        ox = (out_w - dw) // 2
-        oy = (out_h - dh) // 2
-        return (0, 0, in_w, in_h), (ox, oy, dw, dh), scale
-
-    crop_w = out_w / scale
-    crop_h = out_h / scale
-    sx = (in_w - crop_w) / 2.0
-    sy = (in_h - crop_h) / 2.0
-    return (sx, sy, crop_w, crop_h), (0, 0, out_w, out_h), scale
-
-
-def compute_fsr_cons(src_rect, in_size, dst_rect):
-    """Compute the four EASU constant vectors (FsrEasuConOffset)."""
-    ivw, ivh = src_rect[2], src_rect[3]
-    isw, ish = in_size
-    osw, osh = float(dst_rect[2]), float(dst_rect[3])
-    ox, oy = src_rect[0], src_rect[1]
-    con0 = [ivw / osw, ivh / osh,
-            0.5 * ivw / osw - 0.5 + ox,
-            0.5 * ivh / osh - 0.5 + oy]
-    con1 = [1.0 / isw, 1.0 / ish, 1.0 / isw, -1.0 / ish]
-    con2 = [-1.0 / isw, 2.0 / ish, 1.0 / isw, 2.0 / ish]
-    con3 = [0.0, 4.0 / ish, 0.0, 0.0]
-    return con0, con1, con2, con3
-
-
-def sharpness_to_rcas(sharpness):
-    """Convert 0..100 slider to an RCAS strength (exp2(-stops)); None = off."""
-    if sharpness <= 0:
-        return None
-    stops = 2.0 * (1.0 - sharpness / 100.0)
-    return 2.0 ** (-stops)
-
-
-def compile_program(vs_src, fs_src):
-    """Compile and link a GL program, raising with the info log on failure."""
-    def _shader(stage, src):
-        sh = gl.glCreateShader(stage)
-        gl.glShaderSource(sh, src)
-        gl.glCompileShader(sh)
-        if not gl.glGetShaderiv(sh, gl.GL_COMPILE_STATUS):
-            log = gl.glGetShaderInfoLog(sh).decode("utf-8", "replace")
-            raise RuntimeError("Shader compile error:\n" + log)
-        return sh
-
-    vs = _shader(gl.GL_VERTEX_SHADER, vs_src)
-    fs = _shader(gl.GL_FRAGMENT_SHADER, fs_src)
-    prog = gl.glCreateProgram()
-    gl.glAttachShader(prog, vs)
-    gl.glAttachShader(prog, fs)
-    gl.glLinkProgram(prog)
-    if not gl.glGetProgramiv(prog, gl.GL_LINK_STATUS):
-        log = gl.glGetProgramInfoLog(prog).decode("utf-8", "replace")
-        raise RuntimeError("Program link error:\n" + log)
-    gl.glDeleteShader(vs)
-    gl.glDeleteShader(fs)
-    return prog
-
-
-# ---------------------------------------------------------------------------
-# GL renderer thread
-# ---------------------------------------------------------------------------
-class GLRenderer(threading.Thread):
-    def __init__(self, state, stats_collector):
-        super().__init__(name="BoostLayer-Renderer", daemon=True)
-        self.state = state
-        self.stats = stats_collector
-        self.display = detect_display_server()
-
-        # GL objects (created on the render thread).
-        self._win = None
-        self._monitor = None
-        self._monitor_idx = None
-        self._windowed_size = (1280, 720)
-
-        self._prog = {}
-        self._fullscreen_vao = None
-
-        # Input texture.
-        self._input_tex = None
-        self._input_w = 0
-        self._input_h = 0
-
-        # Output textures + FBOs.
-        self._out_w = 0
-        self._out_h = 0
-        self._tex_final = [None, None]
-        self._fbo_final = [None, None]
-        self._tex_work = None
-        self._fbo_work = None
-        self._cur = 0
-        self._prev = 1
-        self._have_prev = False
-        self._cur_ts = 0.0
-        self._prev_ts = 0.0
-        self._last_seq = -1
-        self._loc_cache = {}
-
-        # Cached settings / geometry.
-        self._cfg = None
-        self._src_rect = (0, 0, 0, 0)
-        self._dst_rect = (0, 0, 0, 0)
-        self._scale = 1.0
-        self._cons = None
-        self._rcas = None
-
-        # OSD.
-        self._osd_vao = None
-        self._osd_vbo = None
-        self._atlas_tex = None
-        self._char_uv = {}
-        self._atlas_size = (0, 0)
-        self._osd_key = None
-        self._osd_data = None
-
-        self._was_active = False
-        self._x11_win_id = 0
-        self._last_raise = 0.0
-
-    # ======================================================================
-    # GLFW + GL initialisation
-    # ======================================================================
-    def _init_gl(self):
-        if not glfw.init():
-            raise RuntimeError("glfw.init() failed")
-        glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 4)
-        glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
-        glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
-        glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, True)
-        glfw.window_hint(glfw.AUTO_ICONIFY, False)
-        glfw.window_hint(glfw.FLOATING, True)
-        glfw.window_hint(glfw.DECORATED, False)
-        glfw.window_hint(glfw.VISIBLE, False)
-        glfw.window_hint(glfw.RESIZABLE, False)
-
-        monitors = glfw.get_monitors()
-        idx = max(0, min(self.state.output_monitor, len(monitors) - 1))
-        self._monitor_idx = idx
-        self._monitor = monitors[idx]
-        mode = glfw.get_video_mode(self._monitor)
-        self._windowed_size = (mode.size.width, mode.size.height)
-        self._win = glfw.create_window(mode.size.width, mode.size.height,
-                                       APP_NAME, None, None)
-        if not self._win:
-            glfw.terminate()
-            raise RuntimeError("glfw.create_window() failed")
-        # Borderless full-screen overlay positioned on the selected monitor
-        # (not blindly at (0,0), which breaks on multi-monitor layouts).
-        mx, my = glfw.get_monitor_pos(self._monitor)
-        glfw.set_window_pos(self._win, mx, my)
-        self.state.overlay_rect = (int(mx), int(my),
-                                   int(mode.size.width), int(mode.size.height))
-        glfw.make_context_current(self._win)
-        glfw.swap_interval(1)
-        self._make_click_through()
-
-        # Core GL state.
-        gl.glDisable(gl.GL_DEPTH_TEST)
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
-
-        self._prog["scale"] = compile_program(VERT_SRC, SCALE_FRAG_SRC)
-        self._prog["rcas"] = compile_program(VERT_SRC, RCAS_FRAG_SRC)
-        self._prog["blit"] = compile_program(VERT_SRC, BLIT_FRAG_SRC)
-        self._prog["fg"] = compile_program(VERT_SRC, FG_FRAG_SRC)
-        self._prog["osd"] = compile_program(OSD_VERT_SRC, OSD_FRAG_SRC)
-
-        self._fullscreen_vao = gl.glGenVertexArrays(1)
-
-        self._build_osd_atlas()
-        self._create_osd_geometry()
-
-    # ======================================================================
-    # Textures / FBOs
-    # ======================================================================
-    def _new_texture(self, filt):
-        tid = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, tid)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, filt)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, filt)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-        return tid
-
-    def _ensure_input(self, w, h):
-        if self._input_tex is not None and self._input_w == w and self._input_h == h:
-            return
-        if self._input_tex is not None:
-            gl.glDeleteTextures([self._input_tex])
-        self._input_tex = self._new_texture(gl.GL_NEAREST)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._input_tex)
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, w, h, 0,
-                        gl.GL_BGRA, gl.GL_UNSIGNED_BYTE, None)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-        self._input_w, self._input_h = w, h
-
-    def _create_out_texture(self, w, h):
-        tid = self._new_texture(gl.GL_LINEAR)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, tid)
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, w, h, 0,
-                        gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
-        fbo = gl.glGenFramebuffers(1)
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, fbo)
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0,
-                                  gl.GL_TEXTURE_2D, tid, 0)
-        gl.glDrawBuffers([gl.GL_COLOR_ATTACHMENT0])
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-        return tid, fbo
-
-    def _ensure_output(self, w, h):
-        if self._out_w == w and self._out_h == h and self._tex_final[0] is not None:
-            return
-        self._out_w, self._out_h = w, h
-        for i in range(2):
-            if self._tex_final[i] is not None:
-                gl.glDeleteTextures([self._tex_final[i]])
-                gl.glDeleteFramebuffers([self._fbo_final[i]])
-            self._tex_final[i], self._fbo_final[i] = self._create_out_texture(w, h)
-        if self._tex_work is not None:
-            gl.glDeleteTextures([self._tex_work])
-            gl.glDeleteFramebuffers([self._fbo_work])
-        self._tex_work, self._fbo_work = self._create_out_texture(w, h)
-
-    # ======================================================================
-    # OSD font atlas
-    # ======================================================================
-    def _build_osd_atlas(self):
-        chars = sorted(FONT_5X7.keys())
-        cols = 16
-        cell_w, cell_h = 5, 7
-        rows = (len(chars) + cols - 1) // cols
-        atlas_w = cols * cell_w
-        atlas_h = rows * cell_h
-        data = np.zeros((atlas_h, atlas_w), dtype=np.uint8)
-        for idx, ch in enumerate(chars):
-            col = idx % cols
-            row = idx // cols
-            ox = col * cell_w
-            oy = row * cell_h
-            glyph = FONT_5X7[ch]
-            for gy in range(7):
-                line = glyph[gy]
-                for gx in range(5):
-                    if line[gx] == "#":
-                        data[oy + gy, ox + gx] = 255
-            u0 = ox / atlas_w
-            v0 = oy / atlas_h
-            u1 = (ox + cell_w) / atlas_w
-            v1 = (oy + cell_h) / atlas_h
-            self._char_uv[ch] = (u0, v0, u1, v1)
-        # Missing glyphs render as a blank space.
-        self._char_uv.setdefault(" ", (0.0, 0.0, 0.0, 0.0))
-
-        self._atlas_tex = gl.glGenTextures(1)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._atlas_tex)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_R8, atlas_w, atlas_h, 0,
-                        gl.GL_RED, gl.GL_UNSIGNED_BYTE, data)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-        self._atlas_size = (atlas_w, atlas_h)
-
-    def _create_osd_geometry(self):
-        self._osd_vao = gl.glGenVertexArrays(1)
-        self._osd_vbo = gl.glGenBuffers(1)
-        gl.glBindVertexArray(self._osd_vao)
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._osd_vbo)
-        stride = 8 * 4
-        gl.glEnableVertexAttribArray(0)
-        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, stride, ctypes.c_void_p(0))
-        gl.glEnableVertexAttribArray(1)
-        gl.glVertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, stride, ctypes.c_void_p(8))
-        gl.glEnableVertexAttribArray(2)
-        gl.glVertexAttribPointer(2, 4, gl.GL_FLOAT, gl.GL_FALSE, stride, ctypes.c_void_p(16))
-        gl.glBindVertexArray(0)
-
-    # ======================================================================
-    # Main loop
-    # ======================================================================
-    def run(self):
-        if not HAS_GL:
-            print("[BoostLayer] OpenGL/GLFW unavailable; renderer disabled.")
-            return
-        try:
-            self._init_gl()
-        except Exception as e:
-            print("[BoostLayer] Renderer init failed:", e)
-            _log("renderer init failed: %r" % (e,))
-            glfw.terminate()
-            return
-        try:
-            self._loop()
-        finally:
-            self._cleanup()
-
-    def _apply_active(self, active):
-        # The window is already a borderless full-screen overlay; simply show
-        # or hide it. No exclusive-fullscreen switch, so the target game is
-        # never kicked out of its own fullscreen mode.
-        if active:
-            glfw.show_window(self._win)
-            # Keep clicks going to the game/desktop, not to the overlay.
-            self._make_click_through()
-            # Raise without stealing input focus: focusing the overlay would
-            # both annoy the player and make "active window" capture pick the
-            # overlay instead of the game.
-            self._raise_overlay()
-        else:
-            glfw.hide_window(self._win)
-
-    def _make_click_through(self):
-        """Make the overlay input-transparent (X11 SHAPE input region).
-
-        Without this, the always-on-top full-screen window would swallow every
-        click and keypress, so the desktop and the game would seem frozen."""
-        if self.display != "x11":
-            return
-        try:
-            from Xlib import display as _xdisplay, X
-            from Xlib.ext import shape
-            if not self._x11_win_id:
-                self._x11_win_id = int(glfw.get_x11_window(self._win) or 0)
-            wid = self._x11_win_id
-            if not wid:
-                return
-            d = _xdisplay.Display()
-            try:
-                d.query_extension("SHAPE")
-                w = d.create_resource_object("window", wid)
-                # Empty input region: all input passes through to the window
-                # below the overlay.
-                w.shape_rectangles(shape.SO.Set, shape.SK.Input,
-                                   X.Unsorted, 0, 0, [])
-                d.sync()
-            finally:
-                d.close()
-        except Exception as e:
-            _log("overlay: click-through unavailable: %r" % (e,))
-
-    def _raise_overlay(self):
-        """Keep the overlay above the game without stealing input focus.
-
-        ``raise_window`` alone is ignored by some WMs when a fullscreen game
-        re-stacks itself, so every second we also re-assert _NET_WM_STATE_ABOVE
-        through an EWMH client message."""
-        if self.display != "x11":
-            return
-        self._last_raise = time.time()
-        try:
-            if not self._x11_win_id:
-                self._x11_win_id = int(glfw.get_x11_window(self._win) or 0)
-            wid = self._x11_win_id
-            if not wid:
-                return
-            from Xlib import display as _xdisplay, X, protocol
-            d = _xdisplay.Display()
-            try:
-                w = d.create_resource_object("window", wid)
-                root = d.screen().root
-                state_atom = d.intern_atom("_NET_WM_STATE")
-                above_atom = d.intern_atom("_NET_WM_STATE_ABOVE")
-                ev = protocol.event.ClientMessage(
-                    window=w, client_type=state_atom,
-                    data=(32, [1, above_atom, 0, 1, 0]))
-                root.send_event(
-                    ev, event_mask=(X.SubstructureRedirectMask |
-                                    X.SubstructureNotifyMask))
-                w.raise_window()
-                d.flush()
-            finally:
-                d.close()
-        except Exception:
-            pass
-
-    def _sync_output_monitor(self):
-        """Reposition/resize the overlay if the output monitor changed."""
-        try:
-            monitors = glfw.get_monitors()
-        except Exception:
-            return
-        idx = max(0, min(int(self.state.output_monitor), len(monitors) - 1))
-        if idx == self._monitor_idx:
-            return
-        self._monitor_idx = idx
-        self._monitor = monitors[idx]
-        mode = glfw.get_video_mode(self._monitor)
-        mx, my = glfw.get_monitor_pos(self._monitor)
-        glfw.set_window_size(self._win, mode.size.width, mode.size.height)
-        glfw.set_window_pos(self._win, mx, my)
-        self.state.overlay_rect = (int(mx), int(my),
-                                   int(mode.size.width), int(mode.size.height))
-        self._windowed_size = (mode.size.width, mode.size.height)
-
-    def _loop(self):
-        gc.disable()
-        while self.state.running.is_set():
-            glfw.poll_events()
-            if glfw.window_should_close(self._win):
-                self.state.running.clear()
-                break
-
-            self._sync_output_monitor()
-
-            active = self.state.scaling_active
-            if active != self._was_active:
-                self._apply_active(active)
-                self._was_active = active
-
-            if not active:
-                time.sleep(0.02)
-                continue
-
-            # Re-assert always-on-top periodically (some WMs drop the hint
-            # when a fullscreen game restacks itself) — no focus stealing.
-            if time.time() - self._last_raise > 1.0:
-                self._raise_overlay()
-
-            self._render_frame()
-
-    def _render_frame(self):
-        frame, seq, ts = self.state.get_frame()
-        if frame is None:
-            glfw.swap_buffers(self._win)
-            return
-
-        fb_w, fb_h = glfw.get_framebuffer_size(self._win)
-        if fb_w <= 0 or fb_h <= 0:
-            return
-        self._ensure_output(fb_w, fb_h)
-
-        new_frame = seq != self._last_seq
-        if new_frame:
-            self._last_seq = seq
-            self._process_capture(frame, ts)
-
-        if self._have_prev and self._cfg is not None:
-            self._present()
-        self._draw_osd()
-
-        glfw.swap_buffers(self._win)
-        self.stats.bump_render()
-
-    def _process_capture(self, frame, ts):
-        h, w = frame.shape[0], frame.shape[1]
-        self._ensure_input(w, h)
-
-        # Upload (glTexSubImage2D — no texture reallocation).
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._input_tex)
-        gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, w, h,
-                           gl.GL_BGRA, gl.GL_UNSIGNED_BYTE, frame)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-
-        # Refresh settings when dirty or when source size changed.
-        cfg = self._cfg
-        if cfg is None or self.state.consume_dirty() or \
-           w != cfg.get("_src_w", 0) or h != cfg.get("_src_h", 0):
-            cfg = self.state.snapshot()
-            cfg["_src_w"] = w
-            cfg["_src_h"] = h
-            self._cfg = cfg
-            self._recompute_geometry(cfg, w, h)
-
-        # Swap FG ping-pong and render the scaled frame.
-        self._prev, self._cur = self._cur, self._prev
-        self._prev_ts = self._cur_ts
-        self._cur_ts = ts
-        if not self._have_prev:
-            self._have_prev = True
-
-        self._render_scale(w, h)
-
-    def _recompute_geometry(self, cfg, in_w, in_h):
-        out_w, out_h = self._out_w, self._out_h
-        src, dst, scale = compute_rects(cfg["mode"], cfg["aspect"],
-                                        cfg["custom_mult"],
-                                        in_w, in_h, out_w, out_h)
-        self._src_rect = src
-        self._dst_rect = dst
-        self._scale = scale
-        self._cons = compute_fsr_cons(src, (in_w, in_h), dst)
-        self._rcas = sharpness_to_rcas(cfg["sharpness"])
-
-    def _render_scale(self, in_w, in_h):
-        p = self._prog["scale"]
-        gl.glUseProgram(p)
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._fbo_final[self._cur])
-        gl.glViewport(0, 0, self._out_w, self._out_h)
-
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._input_tex)
-        gl.glUniform1i(self._loc(p, "u_src"), 0)
-        gl.glUniform2f(self._loc(p, "u_srcSize"), float(in_w), float(in_h))
-        gl.glUniform2f(self._loc(p, "u_outSize"), float(self._out_w), float(self._out_h))
-        gl.glUniform4f(self._loc(p, "u_srcRect"), *self._src_rect)
-        gl.glUniform4f(self._loc(p, "u_dstRect"), *self._dst_rect)
-        gl.glUniform1i(self._loc(p, "u_mode"), self._cfg["mode"])
-        gl.glUniform4f(self._loc(p, "u_con0"), *self._cons[0])
-        gl.glUniform4f(self._loc(p, "u_con1"), *self._cons[1])
-        gl.glUniform4f(self._loc(p, "u_con2"), *self._cons[2])
-        gl.glUniform4f(self._loc(p, "u_con3"), *self._cons[3])
-
-        gl.glBindVertexArray(self._fullscreen_vao)
-        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-        gl.glBindVertexArray(0)
-
-        # Optional RCAS sharpening pass.
-        if self._rcas is not None:
-            pr = self._prog["rcas"]
-            gl.glUseProgram(pr)
-            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._fbo_work)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._tex_final[self._cur])
-            gl.glUniform1i(self._loc(pr, "u_src"), 0)
-            gl.glUniform1f(self._loc(pr, "u_rcas"), self._rcas)
-            gl.glBindVertexArray(self._fullscreen_vao)
-            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-            gl.glBindVertexArray(0)
-
-            # Copy RCAS result back into the current final texture.
-            pb = self._prog["blit"]
-            gl.glUseProgram(pb)
-            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._fbo_final[self._cur])
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._tex_work)
-            gl.glUniform1i(self._loc(pb, "u_src"), 0)
-            gl.glBindVertexArray(self._fullscreen_vao)
-            gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-            gl.glBindVertexArray(0)
-
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
-
-    def _present(self):
-        cfg = self._cfg
-        if cfg["fg_enabled"] and self._have_prev and self._prev_ts > 0:
-            interval = self._cur_ts - self._prev_ts
-            phase = min(1.0, max(0.0, (time.time() - self._cur_ts) / interval)) \
-                if interval > 0 else 0.0
-            p = self._prog["fg"]
-            gl.glUseProgram(p)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._tex_final[self._cur])
-            gl.glUniform1i(self._loc(p, "u_cur"), 0)
-            gl.glActiveTexture(gl.GL_TEXTURE1)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._tex_final[self._prev])
-            gl.glUniform1i(self._loc(p, "u_prev"), 1)
-            gl.glUniform2f(self._loc(p, "u_size"), float(self._out_w), float(self._out_h))
-            gl.glUniform1f(self._loc(p, "u_fgPhase"), phase)
-        else:
-            p = self._prog["blit"]
-            gl.glUseProgram(p)
-            gl.glActiveTexture(gl.GL_TEXTURE0)
-            gl.glBindTexture(gl.GL_TEXTURE_2D, self._tex_final[self._cur])
-            gl.glUniform1i(self._loc(p, "u_src"), 0)
-
-        gl.glViewport(0, 0, self._out_w, self._out_h)
-        gl.glBindVertexArray(self._fullscreen_vao)
-        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
-        gl.glBindVertexArray(0)
-
-    # ======================================================================
-    # OSD drawing
-    # ======================================================================
-    def _draw_osd(self):
-        cfg = self._cfg
-        if cfg is None or not cfg["osd_enabled"]:
-            return
-
-        with self.state.stats_lock:
-            s = dict(self.state.stats)
-            rev = s.get("rev", 0)
-        key = (rev, cfg["mode"], cfg["sharpness"], cfg["fg_enabled"],
-               cfg["osd_show_fps"], cfg["osd_show_cpu"],
-               cfg["osd_show_gpu"], cfg["osd_show_ram"], cfg["lang"])
-        if key != self._osd_key:
-            self._osd_key = key
-            s["src_size"] = (self._input_w, self._input_h)
-            s["out_size"] = (self._out_w, self._out_h)
-            self._osd_data = self._build_osd_verts(s, cfg)
-
-        data = self._osd_data
-        if data is None or len(data) == 0:
-            return
-
-        gl.glUseProgram(self._prog["osd"])
-        gl.glUniform2f(self._loc(self._prog["osd"], "u_screenSize"),
-                       float(self._out_w), float(self._out_h))
-
-        gl.glBindVertexArray(self._osd_vao)
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self._osd_vbo)
-        gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data, gl.GL_DYNAMIC_DRAW)
-
-        gl.glActiveTexture(gl.GL_TEXTURE0)
-        gl.glBindTexture(gl.GL_TEXTURE_2D, self._atlas_tex)
-        gl.glUniform1i(self._loc(self._prog["osd"], "u_atlas"), 0)
-
-        gl.glUniform1i(self._loc(self._prog["osd"], "u_solid"), 1)
-        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)
-        gl.glUniform1i(self._loc(self._prog["osd"], "u_solid"), 0)
-        gl.glDrawArrays(gl.GL_TRIANGLES, 6, len(data) // 8 - 6)
-
-        gl.glBindVertexArray(0)
-
-    def _build_osd_verts(self, s, cfg):
-        lines = self._build_osd_lines(s, cfg)
-        verts = []
-        box_h = 14 + 22 * len(lines)
-        self._osd_quad_solid(verts, 12, 10, 470, box_h, (0.0, 0.0, 0.0, 0.55))
-        y = 20
-        for line in lines:
-            self._osd_text(verts, line, 24, y, (0.95, 0.95, 0.95, 1.0), 2)
-            y += 22
-        return np.array(verts, dtype=np.float32)
-
-    def _build_osd_lines(self, s, cfg):
-        lang = cfg.get("lang", "en")
-        gpu = s["gpu"]
-        gpu_str = ("%d%%" % int(round(gpu))) if gpu is not None else "N/A"
-        lines = ["%s V%s" % (APP_NAME.upper(), APP_VERSION)]
-        if cfg["osd_show_fps"]:
-            lines.append(tr(lang, "osd_fps")
-                         % (s["capture_fps"], s["render_fps"]))
-        parts = []
-        if cfg["osd_show_cpu"]:
-            parts.append("CPU %3d%%" % int(s["cpu"]))
-        if cfg["osd_show_gpu"]:
-            parts.append("GPU %s" % gpu_str)
-        if cfg["osd_show_ram"]:
-            parts.append("RAM %3d%%" % int(s["ram"]))
-        if parts:
-            lines.append("   ".join(parts))
-        mode_key = SCALE_MODE_NAMES.get(cfg["mode"], "fsr")
-        lines.append("%s  %dx%d -> %dx%d"
-                     % (tr(lang, "osd_mode_" + mode_key),
-                        s["src_size"][0], s["src_size"][1],
-                        s["out_size"][0], s["out_size"][1]))
-        fg_txt = tr(lang, "osd_on") if cfg["fg_enabled"] else tr(lang, "osd_off")
-        lines.append(tr(lang, "osd_fg_sharp") % (fg_txt, cfg["sharpness"]))
-        return lines
-
-    def _osd_quad_solid(self, verts, x0, y0, x1, y1, color):
-        # One solid quad (triangle strip via two triangles).
-        self._push(verts, x0, y0, 0, 0, color)
-        self._push(verts, x1, y0, 0, 0, color)
-        self._push(verts, x0, y1, 0, 0, color)
-        self._push(verts, x0, y1, 0, 0, color)
-        self._push(verts, x1, y0, 0, 0, color)
-        self._push(verts, x1, y1, 0, 0, color)
-
-    def _osd_text(self, verts, text, x, y, color, scale):
-        cx = x
-        for ch in text:
-            u0, v0, u1, v1 = self._char_uv.get(ch, (0.0, 0.0, 0.0, 0.0))
-            x0 = cx
-            x1 = cx + 5 * scale
-            y0 = y
-            y1 = y + 7 * scale
-            self._push(verts, x0, y0, u0, v0, color)
-            self._push(verts, x1, y0, u1, v0, color)
-            self._push(verts, x0, y1, u0, v1, color)
-            self._push(verts, x0, y1, u0, v1, color)
-            self._push(verts, x1, y0, u1, v0, color)
-            self._push(verts, x1, y1, u1, v1, color)
-            cx += 6 * scale
-
-    @staticmethod
-    def _push(verts, x, y, u, v, color):
-        verts.extend((x, y, u, v, color[0], color[1], color[2], color[3]))
-
-    # ======================================================================
-    # Helpers
-    # ======================================================================
-    def _loc(self, prog, name):
-        key = (prog, name)
-        loc = self._loc_cache.get(key)
-        if loc is None:
-            loc = gl.glGetUniformLocation(prog, name)
-            self._loc_cache[key] = loc
-        return loc
-
-    def _cleanup(self):
-        glfw.terminate()
-        gc.enable()
-
-# ---------------------------------------------------------------------------
-# Global hotkey listener (pynput on X11, evdev on Wayland)
-# ---------------------------------------------------------------------------
-class HotkeyListener:
-    def __init__(self, state, on_toggle):
-        self.state = state
-        self.on_toggle = on_toggle
-        self.display = detect_display_server()
-        self._listener = None
-        self._evdev_thread = None
-        self._stop = threading.Event()
-        self._device = None
-
-    def start(self):
-        if self.display == "wayland" and HAS_EVDEV:
-            self._evdev_thread = threading.Thread(
-                target=self._evdev_loop, daemon=True,
-                name="BoostLayer-Hotkey-evdev")
-            self._evdev_thread.start()
-            print("[BoostLayer] Hotkey: evdev backend (Wayland).")
-        elif HAS_PYNPUT:
-            try:
-                self._listener = _pynput_keyboard.GlobalHotKeys(
-                    {self.state.hotkey: self._fire})
-                self._listener.daemon = True
-                self._listener.start()
-                print("[BoostLayer] Hotkey: pynput backend (X11).")
-            except Exception as e:
-                print("[BoostLayer] Hotkey registration failed:", e)
-                self._listener = None
-        else:
-            print("[BoostLayer] No hotkey backend available "
-                  "(install 'pynput' or 'evdev').")
-
-    def stop(self):
-        self._stop.set()
-        if self._listener is not None:
-            try:
-                self._listener.stop()
-            except Exception:
-                pass
-        if self._device is not None:
-            try:
-                self._device.close()
-            except Exception:
-                pass
-
-    def _fire(self):
-        self.on_toggle()
-
-    def _evdev_loop(self):
-        try:
-            paths = evdev.list_devices()
-        except Exception:
-            return
-        dev = None
-        for p in paths:
-            try:
-                d = evdev.InputDevice(p)
-            except OSError:
-                continue
-            caps = d.capabilities(verbose=False)
-            keys = caps.get(1, [])
-            if evdev.ecodes.KEY_A in keys or evdev.ecodes.KEY_S in keys:
-                dev = d
-                break
-        if dev is None:
-            return
-        self._device = dev
-        ctrl = alt = False
-        try:
-            for event in dev.read_loop():
-                if self._stop.is_set():
-                    break
-                if event.type != evdev.ecodes.EV_KEY:
-                    continue
-                code = event.code
-                value = event.value
-                if code in (evdev.ecodes.KEY_LEFTCTRL, evdev.ecodes.KEY_RIGHTCTRL):
-                    ctrl = value != 0
-                elif code in (evdev.ecodes.KEY_LEFTALT, evdev.ecodes.KEY_RIGHTALT):
-                    alt = value != 0
-                elif code == evdev.ecodes.KEY_S and value == 1:
-                    if ctrl and alt:
-                        self._fire()
-        except OSError:
-            pass
-
-
-def _make_tray_image():
-    """Build a PIL image for the system tray icon (lightning bolt)."""
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        return None
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([2, 2, 61, 61], radius=14, fill=(26, 26, 46, 255))
-    bolt = [
-        (int(0.594 * size), int(0.133 * size)),
-        (int(0.242 * size), int(0.539 * size)),
-        (int(0.445 * size), int(0.539 * size)),
-        (int(0.367 * size), int(0.867 * size)),
-        (int(0.766 * size), int(0.422 * size)),
-        (int(0.547 * size), int(0.422 * size)),
-    ]
-    d.polygon(bolt, fill=(0, 232, 156, 255))
-    return img
-
-
-def _enable_system_gi():
-    """Make the distro's PyGObject (gi) importable inside a venv or a frozen
-    build.  Appended to ``sys.path`` so the venv's own packages still win."""
-    for p in ("/usr/lib/python3/dist-packages",
-              "/usr/lib/python3.12/dist-packages"):
-        if os.path.isdir(p) and p not in sys.path:
-            sys.path.append(p)
-    try:
-        import gi  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-class TrayIcon:
-    """System tray icon.  Prefers the Ayatana AppIndicator backend (works on
-    Cinnamon/GNOME/KDE) and falls back to the legacy XEmbed tray.  Optional —
-    degrades gracefully when pystray/Pillow/gi are unavailable."""
-
-    def __init__(self, on_show, on_quit, title="BoostLayer"):
-        self._icon = None
-        self._backend = None
-        self.title = title
-        try:
-            has_gi = _enable_system_gi()
-            if has_gi:
-                os.environ.setdefault("PYSTRAY_BACKEND", "appindicator")
-            else:
-                os.environ.setdefault("PYSTRAY_BACKEND", "xorg")
-            import importlib
-            import pystray
-            img = _make_tray_image()
-            if img is None:
-                return
-            menu = pystray.Menu(
-                pystray.MenuItem("Show", lambda *_: on_show(), default=True),
-                pystray.MenuItem("Quit", lambda *_: on_quit()),
-            )
-            names = ("_appindicator", "_xorg") if has_gi else ("_xorg",)
-            for name in names:
-                try:
-                    mod = importlib.import_module("pystray." + name)
-                    self._icon = mod.Icon("BoostLayer", img, title, menu)
-                    self._backend = name.lstrip("_")
-                    break
-                except Exception as e:
-                    _log("tray backend %s unavailable: %r"
-                         % (name.lstrip("_"), e))
-            if self._icon is None:
-                _log("tray disabled: no usable backend (gi=%s)" % has_gi)
-        except Exception as e:
-            _log("tray unavailable: %r" % (e,))
-            self._icon = None
-
-    @property
-    def available(self):
-        return self._icon is not None
-
-    @property
-    def visible(self):
-        """True once the icon is actually shown by the desktop's tray."""
-        try:
-            return bool(self._icon is not None and self._icon.visible)
-        except Exception:
-            return False
-
-    def start(self):
-        if self._icon is None:
-            return
-        _log("tray: starting backend=%s" % self._backend)
-        if hasattr(self._icon, "run_detached"):
-            self._icon.run_detached()
-        else:
-            threading.Thread(target=self._icon.run, daemon=True,
-                             name="BoostLayer-Tray").start()
-        threading.Thread(target=self._report_state, daemon=True,
-                         name="BoostLayer-TrayCheck").start()
-
-    def _report_state(self):
-        time.sleep(3.0)
-        _log("tray: backend=%s visible=%s" % (self._backend, self.visible))
-
-    def stop(self):
-        if self._icon is not None:
-            try:
-                self._icon.stop()
-            except Exception:
-                pass
-
-
-def _make_window_icon(tk_root, size=64):
-    """Build the window/taskbar icon programmatically (no external file):
-    a dark gradient square with a teal lightning bolt, matching the packaged
-    PNG icon.  Returns a tkinter.PhotoImage."""
-    import tkinter as tk
-
-    bolt = [
-        (0.594, 0.133), (0.242, 0.539), (0.445, 0.539),
-        (0.367, 0.867), (0.766, 0.422), (0.547, 0.422),
-    ]
-
-    def in_bolt(x, y):
-        inside = False
-        n = len(bolt)
-        j = n - 1
-        for i in range(n):
-            xi, yi = bolt[i]
-            xj, yj = bolt[j]
-            if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
-                inside = not inside
-            j = i
-        return inside
-
-    rows = []
-    for yy in range(size):
-        row = []
-        for xx in range(size):
-            nx = (xx + 0.5) / size
-            ny = (yy + 0.5) / size
-            t = ny
-            r = int(18 + (10 - 18) * t)
-            g = int(20 + (8 - 20) * t)
-            b = int(52 + (26 - 52) * t)
-            if in_bolt(nx, ny):
-                r, g, b = 0, 232, 156
-            row.append("#%02x%02x%02x" % (r, g, b))
-        rows.append("{" + " ".join(row) + "}")
-
-    img = tk.PhotoImage(master=tk_root, width=size, height=size)
-    img.put(" ".join(rows))
-    return img
-
-
-# ---------------------------------------------------------------------------
-# GUI (CustomTkinter, dark theme)
-# ---------------------------------------------------------------------------
-class BoostLayerApp:
-    def __init__(self, state, display_server, gpu_name):
-        self.state = state
-        self.display_server = display_server
-        self.gpu_name = gpu_name
-        self.lang = state.lang
-        self._win_refresh_t0 = 0.0
-        self._last_win_ids = None
-        self._tray = None
-
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-
-        self.root = ctk.CTk()
-        self.root.title("BoostLayer")
-        self.root.geometry("540x720")
-        self.root.resizable(True, True)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Window/taskbar icon.
-        try:
-            self._icon = _make_window_icon(self.root)
-            self.root.iconphoto(True, self._icon)
-        except Exception:
-            self._icon = None
-
-        # System tray icon (optional; closes to tray when available).
-        try:
-            self._tray = TrayIcon(self._show_from_tray, self._quit_from_tray)
-            if self._tray.available:
-                self._tray.start()
-            else:
-                self._tray = None
-        except Exception:
-            self._tray = None
-
-        self._build_ui()
-        self._refresh_status()
-        self.root.after(1000, self._periodic_status)
-
-    def _t(self, key):
-        """Localise a UI string in the currently selected language."""
-        return tr(self.lang, key)
-
-    # ------------------------------------------------------------------
-    def _build_ui(self):
-        # Language selector (top, always visible).
-        lang_row = ctk.CTkFrame(self.root, fg_color="transparent")
-        lang_row.pack(fill="x", padx=14, pady=(10, 0))
-        self.lang_label = ctk.CTkLabel(
-            lang_row, text=self._t("language") + ":",
-            anchor="w", font=ctk.CTkFont(size=12))
-        self.lang_label.pack(side="left")
-        self.lang_menu = ctk.CTkOptionMenu(
-            lang_row, values=list(LANGUAGES.values()),
-            command=self._on_lang, width=130)
-        self.lang_menu.set(LANGUAGES.get(self.lang, "English"))
-        self.lang_menu.pack(side="left", padx=(8, 0))
-
-        self.tabview = ctk.CTkTabview(self.root)
-        self.tabview.pack(fill="both", expand=True, padx=12, pady=(6, 8))
-        self.tab_scaling = self.tabview.add(self._t("tab_scaling"))
-        self.tab_osd = self.tabview.add(self._t("tab_osd"))
-        self.tabview.set(self._t("tab_scaling"))
-        self._build_scaling_tab()
-        self._build_osd_tab()
-
-        # Status line.
-        self.status_var = ctk.StringVar(value=self._t("status_listening"))
-        self.status_label = ctk.CTkLabel(
-            self.root, textvariable=self.status_var, anchor="w",
-            font=ctk.CTkFont(size=12))
-        self.status_label.pack(fill="x", padx=14, pady=(0, 4))
-
-        # Buttons.
-        btn = ctk.CTkFrame(self.root, fg_color="transparent")
-        btn.pack(fill="x", padx=14, pady=(0, 14))
-        self.toggle_btn = ctk.CTkButton(
-            btn, text=self._t("start_scaling"), width=160, command=self.on_toggle)
-        self.toggle_btn.pack(side="left")
-        ctk.CTkButton(btn, text=self._t("quit"), width=90, command=self._quit,
-                      fg_color="#7a1f1f",
-                      hover_color="#a02a2a").pack(side="right")
-
-    def _build_scaling_tab(self):
-        t = self.tab_scaling
-        pad = {"padx": 14, "pady": 7}
-        st = self.state
-
-        # Scaling type.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("scaling_type")).pack(side="left")
-        self._mode_labels = [self._t("mode_" + k) for k in SCALE_MODE_KEYS]
-        self._mode_by_label = {
-            lab: SCALE_MODE_IDS[k]
-            for lab, k in zip(self._mode_labels, SCALE_MODE_KEYS)
-        }
-        self.mode_menu = ctk.CTkOptionMenu(
-            row, values=self._mode_labels, width=200, command=self._on_mode)
-        self.mode_menu.set(
-            self._t("mode_" + SCALE_MODE_NAMES.get(st.mode, "fsr")))
-        self.mode_menu.pack(side="right")
-
-        # Sharpness.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("sharpness")).pack(side="left")
-        self.sharp_label = ctk.CTkLabel(row, text=str(st.sharpness), width=36)
-        self.sharp_label.pack(side="right")
-        self.sharp_slider = ctk.CTkSlider(
-            t, from_=0, to=100, command=self._on_sharpness)
-        self.sharp_slider.set(st.sharpness)
-        self.sharp_slider.pack(fill="x", padx=14)
-
-        # Aspect ratio.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("aspect_ratio")).pack(side="left")
-        self._aspect_by_label = {self._t("auto"): "auto",
-                                 self._t("custom"): "custom"}
-        self.aspect_menu = ctk.CTkOptionMenu(
-            row, values=[self._t("auto"), self._t("custom")],
-            width=140, command=self._on_aspect)
-        self.aspect_menu.set(self._t(st.aspect))
-        self.aspect_menu.pack(side="right")
-
-        # Custom multiplier.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("custom_multiplier")).pack(side="left")
-        self.mult_var = ctk.StringVar(value=str(st.custom_mult))
-        self.mult_entry = ctk.CTkEntry(row, width=90,
-                                       textvariable=self.mult_var)
-        self.mult_entry.pack(side="right")
-        self.mult_entry.bind("<Return>", self._on_mult)
-        self.mult_entry.bind("<FocusOut>", self._on_mult)
-        if st.aspect != "custom":
-            self.mult_entry.configure(state="disabled")
-
-        # Frame generation.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("frame_generation")).pack(side="left")
-        self.fg_switch = ctk.CTkSwitch(row, text="", command=self._on_fg)
-        if st.fg_enabled:
-            self.fg_switch.select()
-        self.fg_switch.pack(side="right")
-
-        # Capture delay.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("capture_delay_ms")).pack(side="left")
-        self.delay_label = ctk.CTkLabel(row, text=str(st.capture_delay_ms),
-                                        width=36)
-        self.delay_label.pack(side="right")
-        self.delay_slider = ctk.CTkSlider(
-            t, from_=0, to=500, command=self._on_delay)
-        self.delay_slider.set(st.capture_delay_ms)
-        self.delay_slider.pack(fill="x", padx=14)
-
-        # Capture target.
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("capture_target")).pack(side="left")
-        self._target_by_label = {
-            self._t("fullscreen"): "fullscreen",
-            self._t("active_window"): "active",
-            self._t("window"): "window",
-        }
-        self.target_menu = ctk.CTkOptionMenu(
-            row, values=[self._t("fullscreen"), self._t("active_window"),
-                         self._t("window")],
-            width=150, command=self._on_target)
-        target_display = {
-            "fullscreen": "fullscreen", "active": "active_window",
-            "window": "window",
-        }.get(st.capture_target, "fullscreen")
-        self.target_menu.set(self._t(target_display))
-        self.target_menu.pack(side="right")
-
-        # Target window (XComposite) selector + actions.
-        win_row = ctk.CTkFrame(t, fg_color="transparent")
-        win_row.pack(fill="x", **pad)
-        ctk.CTkLabel(win_row, text=self._t("target_window")).pack(side="left")
-        self.click_btn = ctk.CTkButton(
-            win_row, text=self._t("select_window"), width=90,
-            command=self._on_select_window)
-        self.click_btn.pack(side="right", padx=(0, 6))
-        self.refresh_btn = ctk.CTkButton(
-            win_row, text=self._t("refresh"), width=60,
-            command=self._refresh_windows)
-        self.refresh_btn.pack(side="right", padx=(0, 6))
-        self._windows = []
-        self._win_by_label = {}
-        self._last_win_ids = None
-        self.window_menu = ctk.CTkOptionMenu(
-            win_row, values=[], width=180, command=self._on_window)
-        self.window_menu.pack(side="right")
-        self._refresh_windows()
-
-        # Capture monitor (mss index) and output monitor (GLFW index).
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("capture_monitor")).pack(side="left")
-        self.cap_mon_menu = ctk.CTkOptionMenu(
-            row, values=["1", "2", "3", "4"], width=90,
-            command=self._on_capture_monitor)
-        self.cap_mon_menu.set(str(st.capture_monitor))
-        self.cap_mon_menu.pack(side="right")
-
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("output_monitor")).pack(side="left")
-        self.out_mon_menu = ctk.CTkOptionMenu(
-            row, values=["1", "2", "3", "4"], width=90,
-            command=self._on_output_monitor)
-        self.out_mon_menu.set(str(st.output_monitor + 1))
-        self.out_mon_menu.pack(side="right")
-
-        ctk.CTkLabel(t, text=self._t("capture_note"), wraplength=460,
-                     justify="left", font=ctk.CTkFont(size=11),
-                     text_color="#8a8a8a"
-                     ).pack(fill="x", padx=14, pady=8)
-
-    def _build_osd_tab(self):
-        t = self.tab_osd
-        pad = {"padx": 14, "pady": 10}
-        st = self.state
-
-        row = ctk.CTkFrame(t, fg_color="transparent")
-        row.pack(fill="x", **pad)
-        ctk.CTkLabel(row, text=self._t("performance_osd")).pack(side="left")
-        self.osd_switch = ctk.CTkSwitch(row, text="", command=self._on_osd)
-        if st.osd_enabled:
-            self.osd_switch.select()
-        self.osd_switch.pack(side="right")
-
-        ctk.CTkLabel(t, text=self._t("displayed_metrics"), anchor="w",
-                     font=ctk.CTkFont(size=13, weight="bold")
-                     ).pack(fill="x", padx=14, pady=(6, 0))
-
-        self.fps_chk = ctk.CTkCheckBox(t, text=self._t("metric_fps"),
-                                       command=self._on_metrics)
-        if st.osd_show_fps:
-            self.fps_chk.select()
-        self.fps_chk.pack(anchor="w", **pad)
-
-        self.cpu_chk = ctk.CTkCheckBox(t, text=self._t("metric_cpu"),
-                                       command=self._on_metrics)
-        if st.osd_show_cpu:
-            self.cpu_chk.select()
-        self.cpu_chk.pack(anchor="w", **pad)
-
-        self.gpu_chk = ctk.CTkCheckBox(t, text=self._t("metric_gpu"),
-                                       command=self._on_metrics)
-        if st.osd_show_gpu:
-            self.gpu_chk.select()
-        self.gpu_chk.pack(anchor="w", **pad)
-
-        self.ram_chk = ctk.CTkCheckBox(t, text=self._t("metric_ram"),
-                                       command=self._on_metrics)
-        if st.osd_show_ram:
-            self.ram_chk.select()
-        self.ram_chk.pack(anchor="w", **pad)
-
-        ctk.CTkLabel(t, text=self._t("gpu_note"), wraplength=460,
-                     justify="left", font=ctk.CTkFont(size=11),
-                     text_color="#8a8a8a"
-                     ).pack(fill="x", padx=14, pady=10)
-
-    # ------------------------------------------------------------------
-    # Callbacks
-    # ------------------------------------------------------------------
-    def _on_mode(self, value):
-        self.state.update(mode=self._mode_by_label.get(value, 0))
-
-    def _on_sharpness(self, value):
-        v = int(round(float(value)))
-        self.sharp_label.configure(text=str(v))
-        self.state.update(sharpness=v)
-
-    def _on_aspect(self, value):
-        aspect = self._aspect_by_label.get(value, "auto")
-        self.state.update(aspect=aspect)
-        self.mult_entry.configure(
-            state="normal" if aspect == "custom" else "disabled")
-
-    def _on_mult(self, _event=None):
-        try:
-            v = float(self.mult_var.get())
-            if v <= 0:
-                raise ValueError
-            self.state.update(custom_mult=v)
-        except ValueError:
-            self.mult_var.set(str(self.state.custom_mult))
-
-    def _on_fg(self):
-        self.state.update(fg_enabled=bool(self.fg_switch.get()))
-
-    def _on_delay(self, value):
-        v = int(round(float(value)))
-        self.delay_label.configure(text=str(v))
-        self.state.update(capture_delay_ms=v)
-
-    def _on_target(self, value):
-        self.state.update(
-            capture_target=self._target_by_label.get(value, "fullscreen"))
-
-    def _refresh_windows(self):
-        wins = list_windows()
-        new_ids = tuple(sorted(w[0] for w in wins))
-        if new_ids == getattr(self, "_last_win_ids", None):
-            return  # no new/removed windows — avoid churn while a game launches
-        self._last_win_ids = new_ids
-        self._windows = wins
-        self._win_by_label = {}
-        labels = []
-        seen = {}
-        for wid, title, w, h in wins:
-            label = "%s  (%dx%d)" % (title, w, h)
-            if len(label) > 42:
-                label = label[:39] + "..."
-            if label in seen:
-                seen[label] += 1
-                label = "%s #%d" % (label, seen[label])
-            else:
-                seen[label] = 1
-            labels.append(label)
-            self._win_by_label[label] = wid
-        if not labels:
-            labels = [self._t("window")]
-        self.window_menu.configure(values=labels)
-        cur = self.state.capture_window_id
-        selected = False
-        if cur is not None:
-            for lab, wid in self._win_by_label.items():
-                if wid == cur:
-                    self.window_menu.set(lab)
-                    selected = True
-                    break
-        if not selected:
-            self.window_menu.set(labels[0])
-
-    def _on_window(self, label):
-        wid = self._win_by_label.get(label)
-        if wid is None:
-            return
-        self.state.update(capture_target="window", capture_window_id=wid)
-        self.target_menu.set(self._t("window"))
-
-    def _on_select_window(self):
-        """Hide the GUI, let the user click a window, then capture it."""
-        self.root.withdraw()
-        self.root.update()
-        time.sleep(0.3)
-        wid = None
-        try:
-            wid = select_window_by_click()
-        finally:
-            self.root.deiconify()
-        if wid:
-            self.state.update(capture_target="window", capture_window_id=wid)
-            self.target_menu.set(self._t("window"))
-            self._refresh_windows()
-            # Reflect the click even if the window list itself did not change.
-            for lab, w in self._win_by_label.items():
-                if w == wid:
-                    self.window_menu.set(lab)
-                    break
-
-    def _on_capture_monitor(self, value):
-        try:
-            self.state.update(capture_monitor=int(value))
-        except ValueError:
-            pass
-
-    def _on_output_monitor(self, value):
-        try:
-            self.state.update(output_monitor=int(value) - 1)  # 1-based -> 0-based
-        except ValueError:
-            pass
-
-    def _on_osd(self):
-        self.state.update(osd_enabled=bool(self.osd_switch.get()))
-
-    def _on_metrics(self):
-        self.state.update(
-            osd_show_fps=bool(self.fps_chk.get()),
-            osd_show_cpu=bool(self.cpu_chk.get()),
-            osd_show_gpu=bool(self.gpu_chk.get()),
-            osd_show_ram=bool(self.ram_chk.get()),
-        )
-
-    # ------------------------------------------------------------------
-    def on_toggle(self):
-        active = self.state.toggle_scaling()
-        self.root.after(0, self._refresh_status)
-
-    def _refresh_status(self):
-        active = self.state.scaling_active
-        self.toggle_btn.configure(
-            text=self._t("stop_scaling") if active else self._t("start_scaling"))
-        server = self.display_server.upper()
-        state_txt = self._t("status_scaling") if active else self._t("status_idle")
-        self.status_var.set(
-            self._t("status_fmt")
-            % (self.state.hotkey, state_txt, server, self.gpu_name))
-
-    def _periodic_status(self):
-        if self.root.winfo_exists():
-            self._refresh_status()
-            now = time.time()
-            if now - self._win_refresh_t0 >= 3.0:
-                self._win_refresh_t0 = now
-                try:
-                    self._refresh_windows()
-                except Exception:
-                    pass
-            self.root.after(1000, self._periodic_status)
-
-    def _on_lang(self, value):
-        code = {v: k for k, v in LANGUAGES.items()}.get(value, "en")
-        if code == self.lang:
-            return
-        self.lang = code
-        self.state.update(lang=code)
-        self._rebuild_ui()
-
-    def _rebuild_ui(self):
-        for w in self.root.winfo_children():
-            w.destroy()
-        self._build_ui()
-        self._refresh_status()
-
-    def _quit(self):
-        self.state.running.clear()
-        if self._tray is not None:
-            self._tray.stop()
-        self.root.destroy()
-
-    def _on_close(self):
-        # Close button -> hide to tray.  If the desktop has no tray, minimize
-        # instead so the window can never get lost.
-        if self._tray is not None and self._tray.visible:
-            self.root.withdraw()
-        elif self._tray is not None:
-            self.root.iconify()
-        else:
-            self._quit()
-
-    def _show_from_tray(self):
-        def _restore():
-            self.root.deiconify()
-            self.root.lift()
-            try:
-                self.root.focus_force()
-            except Exception:
-                pass
-        self.root.after(0, _restore)
-
-    def _quit_from_tray(self):
-        self.root.after(0, self._quit)
-
-    def run(self):
-        self.root.mainloop()
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-def main():
-    print("=" * 60)
-    print("%s v%s — Linux scaling overlay" % (APP_NAME, APP_VERSION))
-    print("=" * 60)
-
-    # Only one instance may run: several overlays capturing and presenting at
-    # the same time would stack windows and can freeze the desktop.
-    instance_lock = _acquire_single_instance()
-    if instance_lock is False:
-        _log("second instance refused (single-instance lock held)")
-        print("Another BoostLayer instance is already running — exiting.")
+def main() -> int:
+    if "--steam-exec" in sys.argv:
+        return steam_exec_cli(sys.argv)
+    if "--version" in sys.argv:
+        print(f"{APP_NAME} {APP_VERSION}")
         return 0
-
-    # Log uncaught thread exceptions instead of losing them (the packaged
-    # build has no attached terminal).
-    def _thread_hook(args):
-        _log("uncaught exception in %s: %r"
-             % (getattr(args.thread, "name", "?"), args.exc_value))
-    threading.excepthook = _thread_hook
-
-    display = detect_display_server()
-    gpu = GpuMonitor()
-    print("Display server :", display)
-    print("GPU            :", gpu.name)
-    if psutil is None:
-        print("WARNING: 'psutil' missing — CPU/RAM telemetry disabled.")
-    if not HAS_MSS:
-        print("ERROR: 'mss' missing — screen capture unavailable.")
-    if not HAS_GL:
-        print("ERROR: 'PyOpenGL'/'glfw' missing — renderer unavailable.")
-    if not HAS_CTK:
-        print("ERROR: 'customtkinter' missing — GUI unavailable.")
-        return 1
-
-    state = AppState()
-    stats = StatsCollector(state, gpu)
-    capture = CaptureThread(state, stats)
-    renderer = GLRenderer(state, stats)
-    app = BoostLayerApp(state, display, gpu.name)
-    hotkey = HotkeyListener(state, app.on_toggle)
-
-    # Start background threads before entering the Tk mainloop.
-    stats.start()
-    capture.start()
-    renderer.start()
-    hotkey.start()
-
-    # Log uncaught thread exceptions instead of losing them (the packaged
-    # build has no attached terminal).
-    _log("%s v%s started (display=%s, gpu=%s)"
-         % (APP_NAME, APP_VERSION, display, gpu.name))
-
-    rc = 0
     try:
-        app.run()
-    except KeyboardInterrupt:
-        rc = 130
-    finally:
-        state.running.clear()
-        hotkey.stop()
-        for t in (capture, renderer, stats):
-            t.join(timeout=2.0)
-    return rc
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setApplicationName("boostlayer")
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName("Boostlayer")
+    app.setDesktopFileName("boostlayer")
+    app.setQuitOnLastWindowClosed(False)
+
+    database = Database()
+    set_language(database.get_setting("language", DEFAULT_LANGUAGE))
+    set_theme(database.get_setting("theme", DEFAULT_THEME))
+    app.setWindowIcon(app_icon())
+    app.setStyleSheet(build_qss(QSS))
+    app.aboutToQuit.connect(database.close)
+
+    def exception_hook(exc_type, exc_value, exc_tb):
+        text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        log.error("Unhandled exception:\n%s", text)
+        try:
+            QMessageBox.critical(
+                None,
+                tr("Boostlayer — błąd"),
+                tr(
+                    "Wystąpił nieoczekiwany błąd:\n\n{error}\n\nSzczegóły: {path}",
+                    error=exc_value,
+                    path=LOG_PATH,
+                ),
+            )
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = exception_hook
+    window = MainWindow(database)
+    app.aboutToQuit.connect(window.shutdown_hotkey)
+    window.show()
+    window._refresh_tray_menu()
+    if "--console" in sys.argv:
+        QTimer.singleShot(0, window.open_console)
+    return app.exec()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

@@ -1,0 +1,156 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag do wydania (np. v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: AppImage + deb
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            v*) VERSION="${TAG#v}" ;;
+            *)  VERSION="$TAG" ;;
+          esac
+          if [ -z "$VERSION" ]; then
+            echo "Nie można ustalić wersji." >&2
+            exit 1
+          fi
+          printf '%s\n' "$VERSION" > VERSION
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            wget \
+            file \
+            dpkg \
+            libfuse2 \
+            libgl1 \
+            libegl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            xvfb
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "PyQt6>=6.7,<7" "pyinstaller>=6.10,<7"
+
+      - name: Verify Python sources
+        shell: bash
+        run: |
+          python3 -m py_compile main.py core.py db.py theme.py console.py tools/render_icons.py
+          sh -n launcher.sh
+          sh -n build.sh
+          sh -n release.sh
+          sh -n tools/install-mangohud32.sh
+          sh -n tools/install-gamepad-udev.sh
+          python3 -m unittest discover -s tests -v
+          VERSION="${{ steps.version.outputs.version }}" BOOSTLAYER_HOME="$RUNNER_TEMP/boostlayer-smoke" \
+            python3 - <<'PY'
+          import main
+          from PyQt6.QtWidgets import QApplication
+          app = QApplication([])
+          app.setStyleSheet(main.QSS)
+          database = main.Database()
+          window = main.MainWindow(database)
+          assert window.stack.count() == 4
+          assert database.get_mangohud()["position"]
+          database.close()
+          print("UI smoke test OK")
+          PY
+
+      - name: Build AppImage and deb
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          chmod +x build.sh
+          ./build.sh
+          test -n "$(find dist -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)"
+
+      - name: Verify package contents
+        shell: bash
+        run: |
+          DEB=$(find dist -maxdepth 1 -name '*.deb' -print -quit)
+          APPIMAGE=$(find dist -maxdepth 1 -name '*.AppImage' -print -quit)
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB" | grep -E 'boostlayer$|boostlayer.desktop|boostlayer.svg'
+          APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE" --version
+          cat dist/SHA256SUMS
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Boostlayer-${{ steps.version.outputs.version }}-linux-x86_64
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "Boostlayer ${{ steps.version.outputs.version }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
