@@ -45,6 +45,9 @@ runtime jest **PyQt6**.
   DirectX 9, XACT, .NET, Media Foundation i własne verb-y. Działa dla Wine/Proton
   oraz — przez `protontricks` — dla gier Steam. Można włączyć automatyczną
   instalację wybranych komponentów przed startem gry.
+- **Biblioteka Steam** — osobna zakładka ze wszystkimi posiadanymi grami
+  (Steam Web API key), filtrem zainstalowanych i przyciskiem instalacji przez
+  `steam://install/<appid>`.
 - **Steam** — import `appmanifest_*.acf`, okładki z lokalnego `librarycache`,
   potem CDN. Gry Steam uruchamiane są przez klienta Steam; wrapper
   `~/.config/boostlayer/steam-wrapper.sh` jest automatycznie dopisywany do
@@ -78,6 +81,8 @@ runtime jest **PyQt6**.
 - Winetricks jest opcjonalny. Można użyć systemowego `winetricks` albo
   zainstalować lokalną kopię z Ustawień → Zależności. Dla gier Steam potrzebny
   jest `protontricks`. Winetricks może wymagać `cabextract` i `unzip`.
+- Pełna biblioteka Steam wymaga internetu i Steam Web API key; klucz jest
+  przechowywany lokalnie w bazie Boostlayera.
 - Do budowy: `PyInstaller`, `dpkg-deb`, `appimagetool` (pobierany przez
   `build.sh`, jeśli go brak).
 

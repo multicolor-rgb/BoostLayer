@@ -116,7 +116,9 @@ from core import (
     RunnerDownloadWorker,
     RunnerInfo,
     RunnerReleasesWorker,
+    SteamCoverWorker,
     SteamOptionsWorker,
+    SteamOwnedGamesWorker,
     SteamSyncWorker,
     WinetricksInstallWorker,
     WinetricksPlan,
@@ -150,8 +152,13 @@ from core import (
     steam_client_command,
     steam_is_running,
     steam_game_process_running,
+    steam_install_uri,
+    steam_installed_appids,
     steam_launch_action_for_appid,
     steam_launch_option,
+    steam_run_uri,
+    steam_store_uri,
+    steam_uri_command,
     steam_wrapper_path,
     tool_status,
     winetricks_applied,
@@ -2165,6 +2172,7 @@ class SettingsPage(QWidget):
     steam_restore_requested = pyqtSignal()
     clear_cache_requested = pyqtSignal()
     settings_changed = pyqtSignal()
+    steam_library_sync_requested = pyqtSignal()
     theme_changed = pyqtSignal(str)
     language_changed = pyqtSignal(str)
 
@@ -2194,6 +2202,7 @@ class SettingsPage(QWidget):
         outer.addWidget(subtitle)
 
         scroll = QScrollArea()
+        self.settings_scroll = scroll
         scroll.setWidgetResizable(True)
         style_scroll_area(scroll)
         host = QWidget()
@@ -2268,8 +2277,13 @@ class SettingsPage(QWidget):
         body.addWidget(runtime)
 
         steam_panel, steam_layout = self._panel(
-            tr("STEAM"), tr("Import appmanifest_*.acf i okładek z lokalnego cache/CDN.")
+            tr("STEAM"),
+            tr(
+                "Import appmanifest_*.acf, okładek oraz pełnej biblioteki "
+                "przez Steam Web API."
+            ),
         )
+        self.steam_panel = steam_panel
         steam_row = QWidget()
         steam_row_layout = QHBoxLayout(steam_row)
         steam_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -2285,6 +2299,41 @@ class SettingsPage(QWidget):
         browse.clicked.connect(self._browse_steam)
         steam_row_layout.addWidget(browse)
         steam_layout.addWidget(steam_row)
+        api_form = QFormLayout()
+        api_form.setSpacing(8)
+        self.steam_api_key_edit = QLineEdit()
+        self.steam_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.steam_api_key_edit.setPlaceholderText(tr("Steam Web API key"))
+        api_form.addRow(tr("Steam Web API key"), self.steam_api_key_edit)
+        self.steam_id_edit = QLineEdit()
+        self.steam_id_edit.setPlaceholderText(tr("Automatycznie z loginusers.vdf"))
+        api_form.addRow(tr("SteamID64"), self.steam_id_edit)
+        steam_layout.addLayout(api_form)
+        api_actions = QHBoxLayout()
+        api_help = QPushButton(tr("POBIERZ KLUCZ API"))
+        api_help.setObjectName("GhostButton")
+        api_help.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://steamcommunity.com/dev/apikey")
+            )
+        )
+        api_actions.addWidget(api_help)
+        library_sync = QPushButton(tr("POBIERZ BIBLIOTEKĘ STEAM"))
+        library_sync.setObjectName("PrimaryButton")
+        library_sync.clicked.connect(self._request_steam_library_sync)
+        api_actions.addWidget(library_sync)
+        api_actions.addStretch(1)
+        steam_layout.addLayout(api_actions)
+        api_note = QLabel(
+            tr("Klucz Steam Web API jest przechowywany lokalnie w bazie Boostlayera.")
+        )
+        api_note.setObjectName("Muted")
+        api_note.setWordWrap(True)
+        steam_layout.addWidget(api_note)
+        self.steam_library_status = QLabel("")
+        self.steam_library_status.setObjectName("Muted")
+        self.steam_library_status.setWordWrap(True)
+        steam_layout.addWidget(self.steam_library_status)
         steam_actions = QHBoxLayout()
         sync_button = QPushButton(tr("↻  SYNCHRONIZUJ STEAM"))
         sync_button.setObjectName("GhostButton")
@@ -2458,6 +2507,24 @@ class SettingsPage(QWidget):
             self.db.get_bool("auto_steam_wrapper", True)
         )
         self.steam_edit.setText(self.db.get_setting("steam_path"))
+        self.steam_api_key_edit.setText(self.db.get_setting("steam_api_key"))
+        steam_id = self.db.get_setting("steam_id64").strip()
+        if not steam_id:
+            account = steam_account()
+            if account is not None:
+                steam_id = account.steam_id64
+        self.steam_id_edit.setText(steam_id)
+        synced = self.db.get_setting("steam_library_synced").strip()
+        stats = self.db.steam_library_stats()
+        self.steam_library_status.setText(
+            tr(
+                "Biblioteka Steam: {total} gier, zainstalowanych: {installed}. "
+                "Ostatnia synchronizacja: {date}.",
+                total=stats["total"],
+                installed=stats["installed"],
+                date=synced or tr("nigdy"),
+            )
+        )
         self._refresh_wrapper_status()
         self.refresh_runners()
         self._refresh_deps()
@@ -2492,12 +2559,28 @@ class SettingsPage(QWidget):
                 "language": str(self.language_combo.currentData() or DEFAULT_LANGUAGE),
                 "console_monitor": str(self.console_monitor_combo.currentData() or "0"),
                 "steam_path": self.steam_edit.text().strip(),
+                "steam_api_key": self.steam_api_key_edit.text().strip(),
+                "steam_id64": self.steam_id_edit.text().strip(),
             }
         )
         self.status_label.setText(tr("Zapisano."))
         QTimer.singleShot(2200, lambda: self.status_label.setText(""))
         self.toast.emit(tr("Ustawienia globalne zapisane."))
         self.settings_changed.emit()
+
+    def focus_steam_settings(self) -> None:
+        self.settings_scroll.ensureWidgetVisible(self.steam_panel)
+        self.steam_api_key_edit.setFocus()
+
+    def _request_steam_library_sync(self) -> None:
+        self.db.set_many(
+            {
+                "steam_api_key": self.steam_api_key_edit.text().strip(),
+                "steam_id64": self.steam_id_edit.text().strip(),
+                "steam_path": self.steam_edit.text().strip(),
+            }
+        )
+        self.steam_library_sync_requested.emit()
 
     def _theme_selected(self) -> None:
         key = str(self.theme_combo.currentData() or DEFAULT_THEME)
@@ -3884,6 +3967,326 @@ class LibraryPage(QWidget):
     def set_sync_busy(self, busy: bool) -> None:
         self.sync_button.setEnabled(not busy)
         self.search_edit.setEnabled(not busy)
+class SteamPage(QWidget):
+    """Owned Steam library with install/play actions."""
+
+    sync_requested = pyqtSignal()
+    install_requested = pyqtSignal(str)
+    launch_requested = pyqtSignal(str)
+    store_requested = pyqtSignal(str)
+    settings_requested = pyqtSignal()
+    toast = pyqtSignal(str)
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        self._games: list[dict[str, Any]] = []
+        self._selected_appid = ""
+        self._cover_worker: SteamCoverWorker | None = None
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(220)
+        self._search_timer.timeout.connect(self.reload)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 24, 28, 20)
+        outer.setSpacing(14)
+        header = QHBoxLayout()
+        heading_box = QVBoxLayout()
+        heading_box.setSpacing(2)
+        kicker = QLabel(tr("STEAM // LIBRARY"))
+        kicker.setObjectName("PageKicker")
+        heading_box.addWidget(kicker)
+        heading = QLabel(tr("Biblioteka Steam"))
+        heading.setObjectName("PageTitle")
+        heading_box.addWidget(heading)
+        header.addLayout(heading_box)
+        header.addStretch(1)
+        self.stats_label = QLabel(tr("0 GIER // 0 ZAINSTALOWANYCH"))
+        self.stats_label.setObjectName("StatsPill")
+        header.addWidget(self.stats_label)
+        settings_button = QPushButton(tr("USTAWIENIA STEAM"))
+        settings_button.setObjectName("GhostButton")
+        settings_button.clicked.connect(self.settings_requested.emit)
+        header.addWidget(settings_button)
+        outer.addLayout(header)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(7)
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("Search")
+        self.search_edit.setPlaceholderText(tr("Szukaj w bibliotece Steam..."))
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(lambda _text: self._search_timer.start())
+        toolbar.addWidget(self.search_edit, 1)
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItem(tr("Wszystkie gry"), None)
+        self.filter_combo.addItem(tr("Zainstalowane"), 1)
+        self.filter_combo.addItem(tr("Nie zainstalowane"), 0)
+        self.filter_combo.currentIndexChanged.connect(self.reload)
+        toolbar.addWidget(self.filter_combo)
+        self.sync_button = QPushButton(tr("↻  ODŚWIEŻ BIBLIOTEKĘ"))
+        self.sync_button.setObjectName("GhostButton")
+        self.sync_button.clicked.connect(self.sync_requested.emit)
+        toolbar.addWidget(self.sync_button)
+        outer.addLayout(toolbar)
+
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        self.table = QTreeWidget()
+        self.table.setObjectName("SteamTable")
+        self.table.setHeaderLabels([tr("GRA"), tr("CZAS GRY"), tr("STATUS")])
+        self.table.setRootIsDecorated(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.table.setIconSize(QSize(34, 46))
+        self.table.setColumnWidth(0, 390)
+        self.table.setColumnWidth(1, 150)
+        self.table.header().setStretchLastSection(True)
+        self.table.currentItemChanged.connect(self._selection_changed)
+        self.table.itemDoubleClicked.connect(self._launch_item)
+        body.addWidget(self.table, 1)
+
+        details = QFrame()
+        details.setObjectName("Panel")
+        details.setFixedWidth(350)
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(18, 16, 18, 16)
+        details_layout.setSpacing(9)
+        detail_kicker = QLabel(tr("WYBRANA GRA"))
+        detail_kicker.setObjectName("PageKicker")
+        details_layout.addWidget(detail_kicker)
+        self.cover = QLabel()
+        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover.setFixedSize(220, 300)
+        self.cover.setObjectName("ConsoleCover")
+        details_layout.addWidget(self.cover, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.title = QLabel(tr("Wybierz grę"))
+        self.title.setObjectName("SectionTitle")
+        self.title.setWordWrap(True)
+        details_layout.addWidget(self.title)
+        self.status = QLabel("")
+        self.status.setObjectName("Muted")
+        details_layout.addWidget(self.status)
+        self.playtime = QLabel("")
+        self.playtime.setObjectName("Muted")
+        details_layout.addWidget(self.playtime)
+        self.appid_label = QLabel("")
+        self.appid_label.setObjectName("Muted")
+        self.appid_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        details_layout.addWidget(self.appid_label)
+        details_layout.addStretch(1)
+        self.install_button = QPushButton(tr("ZAINSTALUJ"))
+        self.install_button.setObjectName("PrimaryButton")
+        self.install_button.clicked.connect(self._install_current)
+        details_layout.addWidget(self.install_button)
+        self.play_button = QPushButton(tr("▶  GRAJ"))
+        self.play_button.setObjectName("PrimaryButton")
+        self.play_button.clicked.connect(self._launch_current)
+        details_layout.addWidget(self.play_button)
+        self.store_button = QPushButton(tr("OTWÓRZ W STEAM"))
+        self.store_button.setObjectName("GhostButton")
+        self.store_button.clicked.connect(self._store_current)
+        details_layout.addWidget(self.store_button)
+        body.addWidget(details)
+        outer.addLayout(body, 1)
+        self.reload()
+
+    def _filter_installed(self) -> int | None:
+        value = self.filter_combo.currentData()
+        return int(value) if value is not None else None
+
+    def reload(self) -> None:
+        search = self.search_edit.text().strip()
+        self._games = self.db.list_steam_library(search, self._filter_installed())
+        stats = self.db.steam_library_stats()
+        self.stats_label.setText(
+            tr(
+                "{total} GIER // {installed} ZAINSTALOWANYCH",
+                total=stats["total"],
+                installed=stats["installed"],
+            )
+        )
+        current = self._selected_appid
+        self.table.blockSignals(True)
+        self.table.clear()
+        selected_item: QTreeWidgetItem | None = None
+        for game in self._games:
+            item = QTreeWidgetItem(
+                [
+                    str(game.get("name", "")),
+                    self._playtime_text(int(game.get("playtime_minutes", 0))),
+                    tr("ZAINSTALOWANA") if game.get("installed") else tr("W BIBLIOTECE"),
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, str(game.get("appid", "")))
+            cover = Path(str(game.get("cover_path", "") or "")).expanduser()
+            if cover.is_file():
+                icon = QIcon(str(cover))
+                if not icon.isNull():
+                    item.setIcon(0, icon)
+            item.setToolTip(0, str(game.get("name", "")))
+            item.setToolTip(2, str(game.get("appid", "")))
+            self.table.addTopLevelItem(item)
+            if current and str(game.get("appid", "")) == current:
+                selected_item = item
+        self.table.blockSignals(False)
+        if selected_item is not None:
+            self.table.setCurrentItem(selected_item)
+        elif self.table.topLevelItemCount():
+            self.table.setCurrentItem(self.table.topLevelItem(0))
+        else:
+            self._selected_appid = ""
+            self.title.setText(tr("Brak pobranej biblioteki Steam"))
+            self.status.setText(
+                tr(
+                    "Skonfiguruj Steam Web API key w Ustawieniach → Steam, "
+                    "a następnie odśwież bibliotekę."
+                )
+            )
+            self.playtime.setText("")
+            self.appid_label.setText("")
+            self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+            self.install_button.hide()
+            self.play_button.hide()
+            self.store_button.hide()
+        if self.table.topLevelItemCount():
+            self._selection_changed(self.table.currentItem(), None)
+
+    def _playtime_text(self, minutes: int) -> str:
+        if minutes <= 0:
+            return tr("Nigdy nie grano")
+        hours, mins = divmod(minutes, 60)
+        if hours:
+            return tr("{hours} h {minutes} min", hours=hours, minutes=mins)
+        return tr("{minutes} min", minutes=mins)
+
+    def _selected_game(self) -> dict[str, Any] | None:
+        item = self.table.currentItem()
+        if item is None:
+            return None
+        appid = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        return self.db.get_steam_library_game(appid) if appid else None
+
+    def _selection_changed(
+        self, current: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None
+    ) -> None:
+        if current is None:
+            return
+        appid = str(current.data(0, Qt.ItemDataRole.UserRole) or "")
+        game = self.db.get_steam_library_game(appid)
+        if game is None:
+            return
+        self._selected_appid = appid
+        self.title.setText(str(game.get("name", "")))
+        installed = bool(game.get("installed"))
+        self.status.setText(
+            tr("Zainstalowana w Steam") if installed else tr("W bibliotece Steam")
+        )
+        self.playtime.setText(
+            tr("Czas gry: {time}", time=self._playtime_text(int(game.get("playtime_minutes", 0))))
+        )
+        self.appid_label.setText(tr("AppID: {appid}", appid=appid))
+        self.install_button.setVisible(not installed)
+        self.play_button.setVisible(installed)
+        self.store_button.show()
+        cover = Path(str(game.get("cover_path", "") or "")).expanduser()
+        if cover.is_file():
+            icon = QIcon(str(cover))
+            if not icon.isNull():
+                self.cover.setPixmap(
+                    icon.pixmap(self.cover.size()).scaled(
+                        self.cover.size(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                return
+        self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+        self._load_cover(appid)
+
+    def _load_cover(self, appid: str) -> None:
+        if self._cover_worker is not None:
+            return
+        self._cover_worker = SteamCoverWorker(appid, self)
+        self._cover_worker.result.connect(self._cover_ready)
+        self._cover_worker.start()
+
+    def _cover_ready(self, appid: str, path: str) -> None:
+        worker = self._cover_worker
+        self._cover_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if path:
+            self.db.set_steam_cover(appid, path)
+            for index in range(self.table.topLevelItemCount()):
+                item = self.table.topLevelItem(index)
+                if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == appid:
+                    icon = QIcon(path)
+                    if not icon.isNull():
+                        item.setIcon(0, icon)
+                    break
+            if appid == self._selected_appid:
+                icon = QIcon(path)
+                if not icon.isNull():
+                    self.cover.setPixmap(
+                        icon.pixmap(self.cover.size()).scaled(
+                            self.cover.size(),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+        if appid != self._selected_appid and self._selected_appid:
+            game = self.db.get_steam_library_game(self._selected_appid)
+            if game and not game.get("cover_path"):
+                self._load_cover(self._selected_appid)
+
+    def _install_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.install_requested.emit(str(game["appid"]))
+
+    def _launch_current(self) -> None:
+        game = self._selected_game()
+        if game is not None and game.get("installed"):
+            self.launch_requested.emit(str(game["appid"]))
+
+    def _store_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.store_requested.emit(str(game["appid"]))
+
+    def _launch_item(self, item: QTreeWidgetItem) -> None:
+        appid = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        game = self.db.get_steam_library_game(appid) if appid else None
+        if game is None:
+            return
+        if game.get("installed"):
+            self.launch_requested.emit(appid)
+        else:
+            self.install_requested.emit(appid)
+
+    def set_sync_busy(self, busy: bool) -> None:
+        self.sync_button.setEnabled(not busy)
+        self.search_edit.setEnabled(not busy)
+
+    def focus_search(self) -> None:
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
+
+    def shutdown(self) -> None:
+        if self._cover_worker is not None:
+            self._cover_worker.wait(5000)
+            self._cover_worker = None
+
+
 def write_runtime_file(
     database: Database,
     game: dict[str, Any],
@@ -4060,7 +4463,11 @@ class MainWindow(QMainWindow):
         self._was_maximized = False
         self._force_quit = False
         self._steam_worker: SteamSyncWorker | None = None
+        self._steam_library_worker: SteamOwnedGamesWorker | None = None
         self._steam_options_worker: SteamOptionsWorker | None = None
+        self._steam_install_pending: set[str] = set()
+        self._steam_install_timer: QTimer | None = None
+        self._steam_install_ticks = 0
         self.console: ConsoleWindow | None = None
         self._steam_pending: tuple[
             SteamOptionsWorker,
@@ -4119,9 +4526,10 @@ class MainWindow(QMainWindow):
         self.nav_group.setExclusive(True)
         menu_items = (
             (tr("01   BIBLIOTEKA"), 0),
-            (tr("02   USTAWIENIA"), 1),
-            (tr("03   RUNNERY"), 2),
-            (tr("04   MANGOHUD"), 3),
+            (tr("02   STEAM"), 1),
+            (tr("03   USTAWIENIA"), 2),
+            (tr("04   RUNNERY"), 3),
+            (tr("05   MANGOHUD"), 4),
         )
         for label, index in menu_items:
             button = QPushButton(label)
@@ -4152,11 +4560,13 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.library_page = LibraryPage(self.db)
+        self.steam_page = SteamPage(self.db)
         self.settings_page = SettingsPage(self.db)
         self.runner_page = RunnerPage(self.db)
         self.mango_page = MangoPage(self.db)
         for page in (
             self.library_page,
+            self.steam_page,
             self.settings_page,
             self.runner_page,
             self.mango_page,
@@ -4174,8 +4584,17 @@ class MainWindow(QMainWindow):
         self.library_page.sync_requested.connect(self.sync_steam)
         self.library_page.big_picture_requested.connect(self.open_console)
         self.library_page.toast.connect(self.toast)
+        self.steam_page.toast.connect(self.toast)
+        self.steam_page.sync_requested.connect(self.sync_steam_library)
+        self.steam_page.install_requested.connect(self.install_steam_game)
+        self.steam_page.launch_requested.connect(self.launch_steam_game)
+        self.steam_page.store_requested.connect(self.open_steam_store)
+        self.steam_page.settings_requested.connect(self._open_steam_settings)
         self.settings_page.toast.connect(self.toast)
         self.settings_page.steam_sync_requested.connect(self.sync_steam)
+        self.settings_page.steam_library_sync_requested.connect(
+            self.sync_steam_library
+        )
         self.settings_page.steam_wrapper_batch_requested.connect(
             self.apply_steam_wrapper_all
         )
@@ -4406,9 +4825,13 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.quit_app)
 
     def _open_settings_page(self) -> None:
-        self.nav_group.button(1).setChecked(True)
-        self.stack.setCurrentIndex(1)
+        self.nav_group.button(2).setChecked(True)
+        self.stack.setCurrentIndex(2)
         self.show_window()
+
+    def _open_steam_settings(self) -> None:
+        self._open_settings_page()
+        self.settings_page.focus_steam_settings()
 
     def open_console(self) -> None:
         if self.console is None:
@@ -4545,6 +4968,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_all(self) -> None:
         self.library_page.reload()
+        self.steam_page.reload()
         self.settings_page.refresh_runners()
         self.runner_page.refresh()
         if self.console is not None:
@@ -4603,6 +5027,8 @@ class MainWindow(QMainWindow):
         if getattr(self, "nav_group", None) is not None:
             self.nav_group.deleteLater()
             self.nav_group = None
+        if getattr(self, "steam_page", None) is not None:
+            self.steam_page.shutdown()
         central = self.takeCentralWidget()
         if central is not None:
             central.deleteLater()
@@ -4794,6 +5220,156 @@ class MainWindow(QMainWindow):
         self._steam_worker = None
         if worker is not None:
             worker.deleteLater()
+
+    def _steam_credentials(self) -> tuple[str, str]:
+        api_key = self.db.get_setting("steam_api_key").strip()
+        steam_id = self.db.get_setting("steam_id64").strip()
+        if not steam_id:
+            account = steam_account()
+            if account is not None:
+                steam_id = account.steam_id64
+        return api_key, steam_id
+
+    def sync_steam_library(self) -> None:
+        if self._steam_library_worker is not None:
+            self.toast(tr("Pobieranie biblioteki Steam już trwa."))
+            return
+        api_key, steam_id = self._steam_credentials()
+        if not api_key:
+            QMessageBox.information(
+                self,
+                tr("Steam"),
+                tr(
+                    "Najpierw wpisz Steam Web API key w Ustawieniach → Steam."
+                ),
+            )
+            self._open_steam_settings()
+            return
+        if not steam_id:
+            QMessageBox.warning(
+                self,
+                tr("Steam"),
+                tr(
+                    "Nie wykryto SteamID64. Uzupełnij go w Ustawieniach → Steam."
+                ),
+            )
+            self._open_steam_settings()
+            return
+        self.steam_page.set_sync_busy(True)
+        self.status_label.setText(tr("Pobieram bibliotekę Steam..."))
+        worker = SteamOwnedGamesWorker(
+            api_key,
+            steam_id,
+            self.db.get_setting("steam_path").strip(),
+            self,
+        )
+        self._steam_library_worker = worker
+        worker.status.connect(self.status_label.setText)
+        worker.result.connect(self._steam_library_result)
+        worker.finished.connect(self._steam_library_finished)
+        worker.start()
+
+    def _steam_library_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                tr("Steam"),
+                str(data.get("error", tr("Nieznany błąd Steam API."))),
+            )
+            return
+        games = data.get("games") or []
+        if not isinstance(games, list):
+            games = []
+        synced = time.strftime("%Y-%m-%d %H:%M")
+        self.db.replace_steam_library(games, synced)
+        self.db.set_setting("steam_library_synced", synced)
+        self.steam_page.reload()
+        self.settings_page.reload()
+        self.toast(
+            tr("Biblioteka Steam: pobrano {count} gier.", count=len(games))
+        )
+
+    def _steam_library_finished(self) -> None:
+        worker = self._steam_library_worker
+        self._steam_library_worker = None
+        self.steam_page.set_sync_busy(False)
+        self.status_label.setText(tr("GOTOWY"))
+        if worker is not None:
+            worker.deleteLater()
+
+    def _run_steam_uri(self, uri: str) -> bool:
+        try:
+            command = steam_uri_command(uri)
+        except RuntimeError as exc:
+            QMessageBox.warning(self, tr("Steam"), str(exc))
+            return False
+        program, *arguments = command
+        ok, _pid = QProcess.startDetached(program, arguments)
+        if not ok:
+            QDesktopServices.openUrl(QUrl(uri))
+        return True
+
+    def install_steam_game(self, appid: str) -> None:
+        appid = str(appid).strip()
+        if not appid:
+            return
+        if not self._run_steam_uri(steam_install_uri(appid)):
+            return
+        self.toast(tr("Steam: uruchomiono instalację AppID {appid}.", appid=appid))
+        self._watch_steam_install(appid)
+
+    def launch_steam_game(self, appid: str) -> None:
+        appid = str(appid).strip()
+        game = self.db.find_steam_game(appid)
+        if game is not None:
+            self.start_game(int(game["id"]))
+            return
+        if self._run_steam_uri(steam_run_uri(appid)):
+            self.toast(tr("Steam: uruchamiam AppID {appid}.", appid=appid))
+
+    def open_steam_store(self, appid: str) -> None:
+        appid = str(appid).strip()
+        if not self._run_steam_uri(steam_store_uri(appid)):
+            QDesktopServices.openUrl(
+                QUrl(f"https://store.steampowered.com/app/{appid}")
+            )
+
+    def _watch_steam_install(self, appid: str) -> None:
+        self._steam_install_pending.add(str(appid))
+        if self._steam_install_timer is None:
+            self._steam_install_ticks = 0
+            timer = QTimer(self)
+            timer.setInterval(3000)
+            timer.timeout.connect(self._poll_steam_install)
+            self._steam_install_timer = timer
+            timer.start()
+
+    def _stop_steam_install_watch(self) -> None:
+        if self._steam_install_timer is not None:
+            self._steam_install_timer.stop()
+            self._steam_install_timer.deleteLater()
+            self._steam_install_timer = None
+        self._steam_install_pending.clear()
+        self._steam_install_ticks = 0
+
+    def _poll_steam_install(self) -> None:
+        self._steam_install_ticks += 1
+        installed = steam_installed_appids()
+        found = self._steam_install_pending.intersection(installed)
+        if found:
+            self.db.set_steam_installed(installed)
+            self._steam_install_pending.difference_update(found)
+            self.steam_page.reload()
+            self.toast(
+                tr(
+                    "Steam: zakończono instalację ({count}).",
+                    count=len(found),
+                )
+            )
+            self.sync_steam()
+        if not self._steam_install_pending or self._steam_install_ticks >= 1200:
+            self._stop_steam_install_watch()
 
     # ------------------------------------------------------------- launch core
     def _stage_runtime(self, game: dict[str, Any]) -> Path:
@@ -5623,6 +6199,11 @@ class MainWindow(QMainWindow):
             if not self._active_process.waitForFinished(1600):
                 self._active_process.kill()
         self._force_quit = True
+        if self._steam_library_worker is not None:
+            self._steam_library_worker.wait(40000)
+            self._steam_library_worker = None
+        if getattr(self, "steam_page", None) is not None:
+            self.steam_page.shutdown()
         self._save_geometry()
         self.close()
         QApplication.quit()
@@ -5644,6 +6225,8 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         if self._force_quit:
+            if getattr(self, "steam_page", None) is not None:
+                self.steam_page.shutdown()
             event.accept()
             return
         if self._active_process is not None:

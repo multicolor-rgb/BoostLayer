@@ -22,6 +22,7 @@ import tarfile
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -1479,13 +1480,14 @@ class SteamAccount:
     account_name: str
     userdata: Path
     localconfig: Path
+    steam_id64: str = ""
 
 
 def steam_account(root: Path | None = None) -> SteamAccount | None:
     root = root or detect_steam_root()
     if root is None:
         return None
-    candidates: list[tuple[bool, int, float, str, str, Path]] = []
+    candidates: list[tuple[bool, int, float, str, str, str, Path]] = []
     loginusers = root / "config" / "loginusers.vdf"
     if loginusers.is_file():
         try:
@@ -1497,7 +1499,8 @@ def steam_account(root: Path | None = None) -> SteamAccount | None:
                     if not entry.is_block:
                         continue
                     try:
-                        account_id = str(int(entry.key) & 0xFFFFFFFF)
+                        steam_id64 = str(entry.key).strip()
+                        account_id = str(int(steam_id64) & 0xFFFFFFFF)
                     except ValueError:
                         continue
                     localconfig = (
@@ -1516,18 +1519,35 @@ def steam_account(root: Path | None = None) -> SteamAccount | None:
                         mtime = 0.0
                     name = _vdf_value(entry.children, "AccountName") or account_id
                     candidates.append(
-                        (auto_login, timestamp, mtime, account_id, name, localconfig)
+                        (
+                            auto_login,
+                            timestamp,
+                            mtime,
+                            account_id,
+                            steam_id64,
+                            name,
+                            localconfig,
+                        )
                     )
         except (OSError, ValueError):
             pass
     if candidates:
         candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-        auto_login, timestamp, mtime, account_id, name, localconfig = candidates[0]
+        (
+            auto_login,
+            timestamp,
+            mtime,
+            account_id,
+            steam_id64,
+            name,
+            localconfig,
+        ) = candidates[0]
         return SteamAccount(
             account_id,
             name,
             localconfig.parent.parent,
             localconfig,
+            steam_id64,
         )
     userdata = root / "userdata"
     if userdata.is_dir():
@@ -1816,6 +1836,7 @@ class SteamManifest:
     name: str
     installdir: str
     library: Path
+    state_flags: int = 0
 
 
 def read_steam_manifests(root: Path) -> list[SteamManifest]:
@@ -1847,8 +1868,164 @@ def read_steam_manifests(root: Path) -> list[SteamManifest]:
                 continue
             if any(fragment in name.lower() for fragment in ignored):
                 continue
-            manifests.append(SteamManifest(appid, name, installdir, library))
+            try:
+                state_flags = int(_acf_value(text, "StateFlags") or 0)
+            except ValueError:
+                state_flags = 0
+            manifests.append(
+                SteamManifest(appid, name, installdir, library, state_flags)
+            )
     return manifests
+
+
+def steam_installed_appids(root: Path | None = None) -> set[str]:
+    root = root or detect_steam_root()
+    if root is None:
+        return set()
+    return {
+        manifest.appid
+        for manifest in read_steam_manifests(root)
+        if manifest.state_flags == 0 or manifest.state_flags & 4
+    }
+
+
+def fetch_steam_owned_games(api_key: str, steam_id64: str) -> list[dict[str, Any]]:
+    """Fetch every owned Steam game through IPlayerService/GetOwnedGames."""
+    api_key = str(api_key or "").strip()
+    steam_id64 = str(steam_id64 or "").strip()
+    if not api_key:
+        raise ValueError(tr("Podaj Steam Web API key w Ustawieniach → Steam."))
+    if not steam_id64:
+        raise ValueError(tr("Nie wykryto SteamID64. Uzupełnij go w Ustawieniach → Steam."))
+    query = urllib.parse.urlencode(
+        {
+            "key": api_key,
+            "steamid": steam_id64,
+            "include_appinfo": 1,
+            "include_played_free_games": 1,
+            "format": "json",
+        }
+    )
+    url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?{query}"
+    try:
+        with http_open(url, timeout=35) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise ValueError(
+                tr("Steam odrzucił klucz API lub SteamID64. Sprawdź ustawienia.")
+            ) from exc
+        raise OSError(
+            tr("Steam API zwróciło błąd HTTP {code}.", code=exc.code)
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise OSError(tr("Błąd sieci: {reason}", reason=exc.reason)) from exc
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(tr("Nieprawidłowa odpowiedź Steam API.")) from exc
+    response_data = data.get("response") if isinstance(data, dict) else None
+    if not isinstance(response_data, dict):
+        raise ValueError(tr("Nieprawidłowa odpowiedź Steam API."))
+    games = response_data.get("games")
+    if not isinstance(games, list):
+        if int(response_data.get("game_count", -1) or 0) == 0:
+            return []
+        raise ValueError(
+            tr(
+                "Steam nie zwrócił listy gier. Sprawdź, czy profil Steam "
+                "pozwala na dostęp do biblioteki i czy klucz API jest poprawny."
+            )
+        )
+    result: list[dict[str, Any]] = []
+    for item in games:
+        if not isinstance(item, dict):
+            continue
+        appid = str(item.get("appid", "") or "").strip()
+        name = str(item.get("name", "") or "").strip()
+        if not appid or not name:
+            continue
+        try:
+            playtime = int(item.get("playtime_forever", 0) or 0)
+        except (TypeError, ValueError):
+            playtime = 0
+        result.append(
+            {
+                "appid": appid,
+                "name": name,
+                "playtime_minutes": max(0, playtime),
+            }
+        )
+    result.sort(key=lambda item: item["name"].lower())
+    return result
+
+
+class SteamOwnedGamesWorker(QThread):
+    status = pyqtSignal(str)
+    result = pyqtSignal(object)
+
+    def __init__(
+        self,
+        api_key: str,
+        steam_id64: str,
+        steam_root: str = "",
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.api_key = api_key
+        self.steam_id64 = steam_id64
+        self.steam_root = steam_root
+
+    def run(self) -> None:
+        try:
+            self.status.emit(tr("Pobieram bibliotekę Steam..."))
+            games = fetch_steam_owned_games(self.api_key, self.steam_id64)
+            root = detect_steam_root(self.steam_root)
+            installed = steam_installed_appids(root)
+            for game in games:
+                game["installed"] = 1 if game["appid"] in installed else 0
+            self.result.emit({"ok": True, "games": games})
+        except Exception as exc:
+            log.error("Steam library fetch failed: %s", traceback.format_exc())
+            self.result.emit({"ok": False, "error": str(exc)})
+
+
+class SteamCoverWorker(QThread):
+    result = pyqtSignal(str, str)
+
+    def __init__(self, appid: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.appid = str(appid)
+
+    def run(self) -> None:
+        root = detect_steam_root()
+        if root is None:
+            self.result.emit(self.appid, "")
+            return
+        try:
+            path = ensure_steam_cover(self.appid, root)
+        except Exception:
+            path = ""
+        self.result.emit(self.appid, path)
+
+
+def steam_uri_command(uri: str) -> list[str]:
+    client = steam_client_command()
+    if not client:
+        raise RuntimeError(tr("Nie znaleziono klienta Steam."))
+    return [*client, uri]
+
+
+def steam_install_uri(appid: str) -> str:
+    return f"steam://install/{str(appid).strip()}"
+
+
+def steam_run_uri(appid: str) -> str:
+    return f"steam://run/{str(appid).strip()}"
+
+
+def steam_store_uri(appid: str) -> str:
+    return f"steam://store/{str(appid).strip()}"
 
 
 _STEAM_SKIP_DIRS = {

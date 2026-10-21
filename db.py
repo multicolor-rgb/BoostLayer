@@ -136,6 +136,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "library_view": "grid",
     "steam_path": "",
     "steam_wrapper": "",
+    "steam_api_key": "",
+    "steam_id64": "",
+    "steam_library_synced": "",
     "auto_steam_wrapper": "1",
     "global_hotkey": "1",
     "theme": "cyber",
@@ -358,6 +361,18 @@ class Database:
                     ON library(name COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_library_steam
                     ON library(steam_appid);
+
+                CREATE TABLE IF NOT EXISTS steam_library (
+                    appid            TEXT PRIMARY KEY,
+                    name             TEXT NOT NULL,
+                    playtime_minutes INTEGER NOT NULL DEFAULT 0,
+                    installed        INTEGER NOT NULL DEFAULT 0,
+                    cover_path       TEXT NOT NULL DEFAULT '',
+                    last_synced      TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_steam_library_name
+                    ON steam_library(name COLLATE NOCASE);
                 """
             )
             self._migrate_schema()
@@ -579,6 +594,115 @@ class Database:
     def delete_game(self, game_id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM library WHERE id = ?", (int(game_id),))
+
+    # ------------------------------------------------------------- Steam catalog
+    def replace_steam_library(
+        self,
+        games: Iterable[dict[str, Any]],
+        synced_at: str = "",
+    ) -> None:
+        """Replace the cached owned-game list while preserving local covers."""
+        with self._lock:
+            existing = {
+                str(row["appid"]): str(row["cover_path"] or "")
+                for row in self._conn.execute(
+                    "SELECT appid, cover_path FROM steam_library"
+                ).fetchall()
+            }
+        rows: list[tuple[str, str, int, int, str, str]] = []
+        for game in games:
+            appid = str(game.get("appid", "")).strip()
+            name = str(game.get("name", "")).strip()
+            if not appid or not name:
+                continue
+            rows.append(
+                (
+                    appid,
+                    name,
+                    int(game.get("playtime_minutes", 0) or 0),
+                    1 if game.get("installed") else 0,
+                    str(game.get("cover_path") or existing.get(appid, "")),
+                    synced_at,
+                )
+            )
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM steam_library")
+            self._conn.executemany(
+                "INSERT INTO steam_library(appid, name, playtime_minutes, "
+                "installed, cover_path, last_synced) VALUES(?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    def list_steam_library(
+        self,
+        search: str = "",
+        installed: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if search.strip():
+            clauses.append("name LIKE ? COLLATE NOCASE")
+            params.append(f"%{search.strip()}%")
+        if installed is not None:
+            clauses.append("installed = ?")
+            params.append(1 if installed else 0)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM steam_library {where} "
+                "ORDER BY installed DESC, name COLLATE NOCASE",
+                params,
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["appid"] = str(item.get("appid") or "")
+            item["playtime_minutes"] = int(item.get("playtime_minutes", 0) or 0)
+            item["installed"] = int(bool(item.get("installed", 0)))
+            item["cover_path"] = str(item.get("cover_path") or "")
+            result.append(item)
+        return result
+
+    def get_steam_library_game(self, appid: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM steam_library WHERE appid = ?", (str(appid),)
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["appid"] = str(item.get("appid") or "")
+        item["playtime_minutes"] = int(item.get("playtime_minutes", 0) or 0)
+        item["installed"] = int(bool(item.get("installed", 0)))
+        item["cover_path"] = str(item.get("cover_path") or "")
+        return item
+
+    def set_steam_cover(self, appid: str, cover_path: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE steam_library SET cover_path = ? WHERE appid = ?",
+                (str(cover_path), str(appid)),
+            )
+
+    def set_steam_installed(self, appids: Iterable[str]) -> None:
+        installed = {str(appid) for appid in appids}
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE steam_library SET installed = 0")
+            self._conn.executemany(
+                "UPDATE steam_library SET installed = 1 WHERE appid = ?",
+                [(appid,) for appid in installed],
+            )
+
+    def steam_library_stats(self) -> dict[str, int]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total, COALESCE(SUM(installed), 0) AS installed "
+                "FROM steam_library"
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0) if row is not None else 0,
+            "installed": int(row["installed"] or 0) if row is not None else 0,
+        }
 
     # -------------------------------------------------------------------- caches
     def clear_shader_cache(self, game_id: int | None = None) -> int:
