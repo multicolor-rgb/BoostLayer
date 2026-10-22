@@ -45,7 +45,7 @@ runtime jest **PyQt6**.
   DirectX 9, XACT, .NET, Media Foundation i własne verb-y. Działa dla Wine/Proton
   oraz — przez `protontricks` — dla gier Steam. Można włączyć automatyczną
   instalację wybranych komponentów przed startem gry.
-- **Biblioteka Steam** — osobna zakładka ze wszystkimi posiadanymi grami
+- **Biblioteka Steam** — zakładka **STEAM** w widoku **SKLEPY** ze wszystkimi posiadanymi grami
   (Steam Web API key), filtrem zainstalowanych i przyciskiem instalacji przez
   `steam://install/<appid>`.
 - **Steam** — import `appmanifest_*.acf`, okładki z lokalnego `librarycache`,
@@ -53,6 +53,47 @@ runtime jest **PyQt6**.
   `~/.config/boostlayer/steam-wrapper.sh` jest automatycznie dopisywany do
   `LaunchOptions` w `localconfig.vdf` (z backupem i walidacją). Steam musi być
   zamknięty na czas edycji; aplikacja pyta o restart.
+- **SKLEPY** — jedna zakładka z pod-stronami **STEAM | AMAZON | GOG | EPIC**.
+  Steam zachowuje swój import `appmanifest_*.acf`, bibliotekę i wrapper
+  LaunchOptions, a jego panel ustawień jest pierwszą zakładką w
+  **Ustawienia → Sklepy**.
+  Wspólny model sklepów (`store`/`store_id`, tabela `store_library`) i wspólne
+  dialogi logowania, postępu oraz wyboru katalogu instalacji. Przy każdym
+  **ZAINSTALUJ** aplikacja pyta o dokładny katalog gry (z propozycją
+  `katalog_bazowy / tytuł`, informacją o wolnym miejscu i opcją zapamiętania
+  katalogu bazowego dla sklepu).
+- **Amazon Games (Prime Gaming)** — integracja przez `nile` (jak w Heroic):
+  logowanie konta Amazon, synchronizacja biblioteki, pobieranie z postępem
+  i anulowaniem, aktualizacje, weryfikacja plików oraz odinstalowanie. `nile`
+  jest pobierany z GitHub Releases do `~/.config/boostlayer/tools` (można
+  wskazać własną binarkę), a dane konta trafiają do izolowanego katalogu
+  `~/.config/boostlayer/amazon/nile`. Uruchamianie wykorzystuje
+  `nile launch --json`, ale sam proces gry przechodzi przez zwykły pipeline
+  Boostlayera — runner, osobny `WINEPREFIX`, MangoHud, Gamescope i limit FPS.
+- **GOG** — integracja przez `gogdl`: logowanie przez stronę GOG, biblioteka
+  z GOG Galaxy API i metadane/okładki z GamesDB, instalacja do wybranego
+  katalogu, aktualizacje i naprawa przez `gogdl`, uruchamianie z `goggame-*.info`
+  przez runner Boostlayera. Tokeny trafiają do
+  `~/.config/boostlayer/gog/auth.json` (0600).
+- **Epic Games** — integracja przez `legendary`: logowanie kodem
+  `authorizationCode`, biblioteka `legendary list --json`, instalacja
+  `--base-path`/`--game-folder` do wybranego katalogu, aktualizacje, naprawa
+  i odinstalowanie. Uruchamianie korzysta z `legendary launch --json`, ale
+  proces gry jest prowadzony przez runner Boostlayera. Konfiguracja jest
+  izolowana w `~/.config/boostlayer/epic/legendary`.
+- **Okładki i rozmiary** — po zalogowaniu/synchronizacji okładki pobierają się
+  w tle dla całej biblioteki i pojawiają się progresywnie w tabeli. Rozmiary
+  gier są dociągane osobno (Amazon/GOG/Epic przez `nile`/`gogdl`/`legendary`,
+  Steam przez `SizeOnDisk` z `appmanifest_*.acf`). Dla niezainstalowanych gier
+  Steam rozmiar pozostaje nieznany. Oba prefetche można wyłączyć w
+  **Ustawienia → Sklepy**.
+- **Wspólna biblioteka** — zainstalowane gry Amazon/GOG/Epic trafiają
+  automatycznie do głównej biblioteki z oznaczeniem sklepu i własnym runnerem,
+  prefiksem, skalowaniem, limitem FPS i Winetricks.
+- **Ubisoft Connect** — planowany w kolejnym etapie. Ubisoft nie udostępnia
+  publicznego API/CLI do cichej instalacji, więc integracja będzie oparta na
+  zarządzanym kliencie Ubisoft Connect w prefiksie Wine (bez automatycznego
+  pobierania w tle).
 - **Zależności** — `.deb` instaluje MangoHud i GameMode przez `Depends`;
   AppImage ma przycisk „Zainstaluj brakujące” korzystający z `pkexec`.
   Gamescope jest opcjonalny, bo nie każda dystrybucja ma go w repozytorium.
@@ -78,6 +119,21 @@ runtime jest **PyQt6**.
 - Na Intel GPU statystyki GPU w MangoHud wymagają `intel-gpu-tools`
   (`intel_gpu_top`); bez tego MangoHud wyłącza `gpu_stats`.
 - Wine trzeba zainstalować osobno (duży pakiet, świadoma decyzja użytkownika).
+- Amazon Games wymaga `nile` (pobierany automatycznie) oraz konta Amazon.
+  Amazon nie przekierowuje logowania na `localhost`, więc po zalogowaniu w
+  przeglądarce trzeba wkleić pełny URL przekierowania. Gry online korzystające
+  z `FuelPump`, anty-cheat oraz część starszych tytułów mogą nie działać —
+  to ograniczenie `nile`. Skrypty `PostInstall` z `fuel.json` nie są
+  uruchamiane na Linuksie; brakujące redisty można doinstalować przez
+  Winetricks.
+- GOG wymaga `gogdl` (pobierany automatycznie) i konta GOG. Wersja v1 instaluje
+  buildy Windows (`--os windows`); natywne wersje Linux GOG wymagają osobnej
+  ścieżki uruchamiania bez Wine.
+- Epic wymaga `legendary` (pobierany automatycznie) i konta Epic. Gry Epic
+  wymagające Ubisoft Connect lub EA App są oznaczone jako wymagające
+  zewnętrznego klienta i nie uruchomią się bez niego.
+- Ubisoft Connect nie ma publicznego API do biblioteki i cichych instalacji;
+  integracja będzie oparta na oficjalnym kliencie uruchamianym w Wine.
 - Winetricks jest opcjonalny. Można użyć systemowego `winetricks` albo
   zainstalować lokalną kopię z Ustawień → Zależności. Dla gier Steam potrzebny
   jest `protontricks`. Winetricks może wymagać `cabextract` i `unzip`.

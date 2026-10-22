@@ -16,7 +16,15 @@ import i18n_de  # noqa: E402
 import i18n_en  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_FILES = ("main.py", "console.py", "core.py", "db.py")
+SOURCE_FILES = (
+    "main.py",
+    "console.py",
+    "core.py",
+    "db.py",
+    "amazon.py",
+    "stores.py",
+    "store_ui.py",
+)
 
 
 def source_keys() -> set[str]:

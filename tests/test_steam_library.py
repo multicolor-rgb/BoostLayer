@@ -70,7 +70,8 @@ class SteamApiTests(unittest.TestCase):
             steamapps.mkdir()
             (steamapps / "appmanifest_1.acf").write_text(
                 '"AppState" { "appid" "1" "name" "Installed" '
-                '"installdir" "Installed" "StateFlags" "4" }',
+                '"installdir" "Installed" "StateFlags" "4" '
+                '"SizeOnDisk" "123456789" }',
                 encoding="utf-8",
             )
             (steamapps / "appmanifest_2.acf").write_text(
@@ -79,6 +80,8 @@ class SteamApiTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(core.steam_installed_appids(root), {"1"})
+            manifests = core.read_steam_manifests(root)
+            self.assertEqual(manifests[0].size, 123456789)
 
 
 class SteamLibraryDatabaseTests(unittest.TestCase):
@@ -120,6 +123,16 @@ class SteamLibraryDatabaseTests(unittest.TestCase):
                 self.assertEqual(
                     database.get_steam_library_game("20")["cover_path"],
                     "/tmp/cover.jpg",
+                )
+                database.set_steam_size("20", 987654321)
+                self.assertEqual(
+                    database.get_steam_library_game("20")["size"], 987654321
+                )
+                database.replace_steam_library(
+                    [{"appid": "20", "name": "Beta", "size": 0}], ""
+                )
+                self.assertEqual(
+                    database.get_steam_library_game("20")["size"], 987654321
                 )
             finally:
                 database.close()

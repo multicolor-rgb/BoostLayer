@@ -14,7 +14,7 @@ import time
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -87,6 +87,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QSystemTrayIcon,
+    QTabWidget,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -96,6 +97,9 @@ from PyQt6.QtWidgets import (
 )
 
 import db
+import amazon
+import stores
+import store_ui
 from db import (
     FPS_LIMITS,
     SCALING_PROFILES,
@@ -117,6 +121,7 @@ from core import (
     RunnerInfo,
     RunnerReleasesWorker,
     SteamCoverWorker,
+    SteamCoverBatchWorker,
     SteamOptionsWorker,
     SteamOwnedGamesWorker,
     SteamSyncWorker,
@@ -902,16 +907,28 @@ def style_scroll_area(scroll: QScrollArea, color: str = "#0E1013") -> None:
     viewport.setPalette(palette)
 
 
+def game_source(game: dict[str, Any]) -> str:
+    """Human-readable store badge used by covers, rows and the console."""
+    store = str(game.get("store", "") or "").strip().lower()
+    if store:
+        return store.upper()
+    if int(game.get("is_steam", 0) or 0):
+        return "STEAM"
+    if int(game.get("is_amazon", 0) or 0):
+        return "AMAZON"
+    return ""
+
+
 class CoverView(QWidget):
     """Rounded, aspect-filled cover with a generated fallback."""
 
     def __init__(
-        self, title: str, pixmap: QPixmap | None = None, steam: bool = False, parent=None
+        self, title: str, pixmap: QPixmap | None = None, source: str = "", parent=None
     ) -> None:
         super().__init__(parent)
         self.title = title
         self.pixmap = pixmap
-        self.steam = steam
+        self.source = (source or "").strip().upper()
         self._hover = False
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
         self.setMinimumSize(64, 84)
@@ -983,7 +1000,7 @@ class CoverView(QWidget):
         overlay.setColorAt(0.0, QColor(0, 0, 0, 0))
         overlay.setColorAt(1.0, QColor(3, 8, 11, 210))
         painter.fillRect(self.rect(), overlay)
-        if self.steam:
+        if self.source:
             theme = get_theme()
             badge_color = QColor(theme.accent)
             badge_color.setAlpha(130)
@@ -993,7 +1010,7 @@ class CoverView(QWidget):
             painter.setPen(QPen(badge_color, 1))
             painter.drawRoundedRect(badge, 5, 5)
             painter.setFont(QFont("DejaVu Sans Mono", 7, QFont.Weight.Bold))
-            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, tr("STEAM"))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, self.source)
         painter.restore()
 
         theme = get_theme()
@@ -1304,7 +1321,7 @@ class GameCard(QFrame):
         layout.setContentsMargins(9, 9, 9, 10)
         layout.setSpacing(7)
         self.cover = CoverView(
-            str(game.get("name", "?")), cover, bool(game.get("is_steam"))
+            str(game.get("name", "?")), cover, game_source(game)
         )
         self.cover.setFixedHeight(310)
         layout.addWidget(self.cover)
@@ -1375,7 +1392,7 @@ class CompactGameRow(QFrame):
         layout.setContentsMargins(8, 7, 10, 7)
         layout.setSpacing(12)
         cover_widget = CoverView(
-            str(game.get("name", "?")), cover, bool(game.get("is_steam"))
+            str(game.get("name", "?")), cover, game_source(game)
         )
         cover_widget.setFixedSize(64, 88)
         layout.addWidget(cover_widget)
@@ -1391,6 +1408,10 @@ class CompactGameRow(QFrame):
         bits = game.get("_bits")
         if game.get("is_steam"):
             source_text = f"STEAM  //  APPID {game.get('steam_appid', '?')}"
+        elif game.get("is_amazon"):
+            source_text = f"AMAZON  //  {game.get('amazon_id', '?')}"
+        elif game.get("store"):
+            source_text = f"{str(game.get('store')).upper()}  //  {game.get('store_id', '?')}"
         else:
             source_text = "STANDALONE"
         if bits:
@@ -1598,6 +1619,46 @@ class GameDialog(QDialog):
             steam_layout.addWidget(copy_option, 0, Qt.AlignmentFlag.AlignLeft)
             form.addRow(tr("Źródło"), steam_host)
 
+        if game and game.get("is_amazon"):
+            amazon_host = QWidget()
+            amazon_layout = QVBoxLayout(amazon_host)
+            amazon_layout.setContentsMargins(0, 0, 0, 0)
+            amazon_layout.setSpacing(6)
+            amazon_info = QLabel(
+                tr(
+                    "<span style='color:#00E5FF'>AMAZON</span>  ID {product} — "
+                    "gra zarządzana przez nile. Uruchamianie odbywa się przez "
+                    "Boostlayer, więc runner, WINEPREFIX, MangoHud, skalowanie "
+                    "i limit FPS działają jak dla zwykłych gier. Instalacją, "
+                    "aktualizacjami i odinstalowaniem zarządza zakładka Amazon.",
+                    product=html.escape(str(game.get("amazon_id", ""))),
+                )
+            )
+            amazon_info.setWordWrap(True)
+            amazon_layout.addWidget(amazon_info)
+            form.addRow(tr("Źródło"), amazon_host)
+
+        if game and game.get("store") in {"gog", "epic"}:
+            store_id = str(game.get("store", "")).upper()
+            store_host = QWidget()
+            store_layout = QVBoxLayout(store_host)
+            store_layout.setContentsMargins(0, 0, 0, 0)
+            store_layout.setSpacing(6)
+            store_info = QLabel(
+                tr(
+                    "<span style='color:#00E5FF'>{store}</span>  ID {game_id} — "
+                    "gra zarządzana przez zewnętrzne narzędzie. Uruchamianie "
+                    "odbywa się przez Boostlayer, więc runner, WINEPREFIX, "
+                    "MangoHud, skalowanie i limit FPS działają jak dla zwykłych "
+                    "gier. Instalacją i aktualizacjami zarządza zakładka SKLEPY.",
+                    store=store_id,
+                    game_id=html.escape(str(game.get("store_id", ""))),
+                )
+            )
+            store_info.setWordWrap(True)
+            store_layout.addWidget(store_info)
+            form.addRow(tr("Źródło"), store_host)
+
         note = QLabel(
             tr("Runner i prefix są izolowane per gra. Zmienne env: jedna para "
             "KEY=VALUE na linię. Argumenty są dzielone jak w POSIX shell.")
@@ -1702,6 +1763,10 @@ class GameDialog(QDialog):
             "env_vars": self.env_edit.toPlainText(),
             "is_steam": int((self.game or {}).get("is_steam", 0)),
             "steam_appid": str((self.game or {}).get("steam_appid", "")),
+            "is_amazon": int((self.game or {}).get("is_amazon", 0)),
+            "amazon_id": str((self.game or {}).get("amazon_id", "")),
+            "store": str((self.game or {}).get("store", "")),
+            "store_id": str((self.game or {}).get("store_id", "")),
             "winetricks_verbs": self.winetricks_verbs,
             "winetricks_auto": 1 if self.winetricks_auto else 0,
             "winetricks_state": self.winetricks_state,
@@ -1801,6 +1866,10 @@ class GameDialog(QDialog):
                 "fps_limit": int(self.fps_combo.currentData() or 0),
                 "is_steam": is_steam,
                 "steam_appid": str((self.game or {}).get("steam_appid", "")),
+                "is_amazon": int((self.game or {}).get("is_amazon", 0)),
+                "amazon_id": str((self.game or {}).get("amazon_id", "")),
+                "store": str((self.game or {}).get("store", "")),
+                "store_id": str((self.game or {}).get("store_id", "")),
                 "cover_path": cover,
                 "winetricks_verbs": self.winetricks_verbs,
                 "winetricks_auto": 1 if self.winetricks_auto_cb.isChecked() else 0,
@@ -2173,6 +2242,14 @@ class SettingsPage(QWidget):
     clear_cache_requested = pyqtSignal()
     settings_changed = pyqtSignal()
     steam_library_sync_requested = pyqtSignal()
+    amazon_setup_requested = pyqtSignal()
+    amazon_login_requested = pyqtSignal()
+    amazon_logout_requested = pyqtSignal()
+    amazon_library_sync_requested = pyqtSignal()
+    store_setup_requested = pyqtSignal(str)
+    store_login_requested = pyqtSignal(str)
+    store_logout_requested = pyqtSignal(str)
+    store_library_sync_requested = pyqtSignal(str)
     theme_changed = pyqtSignal(str)
     language_changed = pyqtSignal(str)
 
@@ -2341,7 +2418,36 @@ class SettingsPage(QWidget):
         steam_actions.addWidget(sync_button)
         steam_actions.addStretch(1)
         steam_layout.addLayout(steam_actions)
-        body.addWidget(steam_panel)
+        stores_panel, stores_layout = self._panel(
+            tr("SKLEPY"),
+            tr(
+                "Steam, Amazon, GOG i Epic w jednym miejscu: logowanie, "
+                "biblioteka, pobieranie i uruchamianie przez runner Boostlayera."
+            ),
+        )
+        prefetch_row = QHBoxLayout()
+        self.prefetch_covers_cb = QCheckBox(tr("Pobieraj okładki w tle"))
+        self.prefetch_sizes_cb = QCheckBox(tr("Pobieraj rozmiary w tle"))
+        prefetch_row.addWidget(self.prefetch_covers_cb)
+        prefetch_row.addWidget(self.prefetch_sizes_cb)
+        prefetch_row.addStretch(1)
+        stores_layout.addLayout(prefetch_row)
+        self.store_settings_tabs = QTabWidget()
+        self.store_settings_tabs.addTab(self.steam_panel, "STEAM")
+        self.store_settings_panels: dict[str, store_ui.StoreSettingsPanel] = {}
+        for store_id in ("amazon", "gog", "epic"):
+            adapter = stores.STORES[store_id]
+            panel = store_ui.StoreSettingsPanel(self.db, adapter, self)
+            panel.setup_requested.connect(self.store_setup_requested.emit)
+            panel.login_requested.connect(self.store_login_requested.emit)
+            panel.logout_requested.connect(self.store_logout_requested.emit)
+            panel.sync_requested.connect(self.store_library_sync_requested.emit)
+            panel.toast.connect(self.toast.emit)
+            self.store_settings_tabs.addTab(panel, adapter.label)
+            self.store_settings_panels[store_id] = panel
+        stores_layout.addWidget(self.store_settings_tabs)
+        self.stores_settings_panel = stores_panel
+        body.addWidget(stores_panel)
 
         wrapper_panel, wrapper_layout = self._panel(
             tr("STEAM WRAPPER"),
@@ -2528,6 +2634,14 @@ class SettingsPage(QWidget):
         self._refresh_wrapper_status()
         self.refresh_runners()
         self._refresh_deps()
+        self.prefetch_covers_cb.setChecked(
+            self.db.get_bool("prefetch_covers", True)
+        )
+        self.prefetch_sizes_cb.setChecked(
+            self.db.get_bool("prefetch_sizes", True)
+        )
+        for panel in self.store_settings_panels.values():
+            panel.reload()
 
     def refresh_runners(self) -> None:
         selected = self.db.get_setting("default_runner")
@@ -2561,16 +2675,40 @@ class SettingsPage(QWidget):
                 "steam_path": self.steam_edit.text().strip(),
                 "steam_api_key": self.steam_api_key_edit.text().strip(),
                 "steam_id64": self.steam_id_edit.text().strip(),
+                "prefetch_covers": "1" if self.prefetch_covers_cb.isChecked() else "0",
+                "prefetch_sizes": "1" if self.prefetch_sizes_cb.isChecked() else "0",
             }
         )
         self.status_label.setText(tr("Zapisano."))
         QTimer.singleShot(2200, lambda: self.status_label.setText(""))
+        for panel in self.store_settings_panels.values():
+            panel.save()
         self.toast.emit(tr("Ustawienia globalne zapisane."))
         self.settings_changed.emit()
 
     def focus_steam_settings(self) -> None:
-        self.settings_scroll.ensureWidgetVisible(self.steam_panel)
+        self.settings_scroll.ensureWidgetVisible(self.stores_settings_panel)
+        self.store_settings_tabs.setCurrentWidget(self.steam_panel)
         self.steam_api_key_edit.setFocus()
+
+    def focus_amazon_settings(self) -> None:
+        self.focus_store_settings("amazon")
+
+    def focus_store_settings(self, store: str) -> None:
+        if store == "steam":
+            self.focus_steam_settings()
+            return
+        panel = self.store_settings_panels.get(store)
+        if panel is None:
+            return
+        self.settings_scroll.ensureWidgetVisible(self.stores_settings_panel)
+        self.store_settings_tabs.setCurrentWidget(panel)
+        panel.refresh_status()
+
+    def _refresh_amazon_status(self) -> None:
+        panel = self.store_settings_panels.get("amazon")
+        if panel is not None:
+            panel.refresh_status()
 
     def _request_steam_library_sync(self) -> None:
         self.db.set_many(
@@ -3089,6 +3227,8 @@ class SettingsPage(QWidget):
     def set_busy(self, busy: bool) -> None:
         # Kept for symmetry with the library toolbar.
         self.steam_edit.setEnabled(not busy)
+        for panel in self.store_settings_panels.values():
+            panel.set_busy(busy)
 
 
 class RunnerPage(QWidget):
@@ -3852,7 +3992,13 @@ class LibraryPage(QWidget):
         for game in self._games:
             game["_bits"] = exe_bits(str(game.get("exe_path", "")))
         stats = self.db.stats()
-        self.stats_label.setText(tr("{games} GIER // {steam} STEAM", games=stats["games"], steam=stats["steam"]))
+        self.stats_label.setText(
+            tr(
+                "{games} GIER // {stores} ZE SKLEPÓW",
+                games=stats["games"],
+                stores=stats.get("stores", 0),
+            )
+        )
         self._dirty_views = set(self.VIEWS)
         self._rebuild_view(self._view_mode)
         self._dirty_views.discard(self._view_mode)
@@ -4035,7 +4181,7 @@ class SteamPage(QWidget):
         body.setSpacing(14)
         self.table = QTreeWidget()
         self.table.setObjectName("SteamTable")
-        self.table.setHeaderLabels([tr("GRA"), tr("CZAS GRY"), tr("STATUS")])
+        self.table.setHeaderLabels([tr("GRA"), tr("CZAS GRY"), tr("ROZMIAR"), tr("STATUS")])
         self.table.setRootIsDecorated(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(
@@ -4045,8 +4191,9 @@ class SteamPage(QWidget):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self.table.setIconSize(QSize(34, 46))
-        self.table.setColumnWidth(0, 390)
-        self.table.setColumnWidth(1, 150)
+        self.table.setColumnWidth(0, 350)
+        self.table.setColumnWidth(1, 130)
+        self.table.setColumnWidth(2, 100)
         self.table.header().setStretchLastSection(True)
         self.table.currentItemChanged.connect(self._selection_changed)
         self.table.itemDoubleClicked.connect(self._launch_item)
@@ -4123,6 +4270,9 @@ class SteamPage(QWidget):
                 [
                     str(game.get("name", "")),
                     self._playtime_text(int(game.get("playtime_minutes", 0))),
+                    human_bytes(int(game.get("size", 0) or 0))
+                    if int(game.get("size", 0) or 0) > 0
+                    else "—",
                     tr("ZAINSTALOWANA") if game.get("installed") else tr("W BIBLIOTECE"),
                 ]
             )
@@ -4133,7 +4283,7 @@ class SteamPage(QWidget):
                 if not icon.isNull():
                     item.setIcon(0, icon)
             item.setToolTip(0, str(game.get("name", "")))
-            item.setToolTip(2, str(game.get("appid", "")))
+            item.setToolTip(3, str(game.get("appid", "")))
             self.table.addTopLevelItem(item)
             if current and str(game.get("appid", "")) == current:
                 selected_item = item
@@ -4248,6 +4398,35 @@ class SteamPage(QWidget):
             if game and not game.get("cover_path"):
                 self._load_cover(self._selected_appid)
 
+    def update_cover(self, appid: str, path: str) -> None:
+        if not path:
+            return
+        icon = QIcon(path)
+        if icon.isNull():
+            return
+        for index in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(index)
+            if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == appid:
+                item.setIcon(0, icon)
+                break
+        if appid == self._selected_appid:
+            self.cover.setPixmap(
+                icon.pixmap(self.cover.size()).scaled(
+                    self.cover.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+    def update_size(self, appid: str, size: int) -> None:
+        for index in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(index)
+            if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == appid:
+                item.setText(
+                    2, human_bytes(int(size or 0)) if int(size or 0) > 0 else "—"
+                )
+                break
+
     def _install_current(self) -> None:
         game = self._selected_game()
         if game is not None:
@@ -4287,6 +4466,713 @@ class SteamPage(QWidget):
             self._cover_worker = None
 
 
+class AmazonLoginDialog(QDialog):
+    """Two-step Amazon device login driven by nile."""
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        self.user: dict[str, str] = {}
+        self._payload: dict[str, str] = {}
+        self._begin_worker: amazon.NileBeginLoginWorker | None = None
+        self._finish_worker: amazon.NileFinishLoginWorker | None = None
+        self._binary = amazon.require_nile(self.db)
+
+        self.setWindowTitle(tr("Logowanie Amazon Games"))
+        self.setWindowIcon(app_icon())
+        self.setModal(True)
+        self.resize(680, 380)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 18, 22, 18)
+        outer.setSpacing(12)
+        kicker = QLabel(tr("AMAZON // KONTO"))
+        kicker.setObjectName("PageKicker")
+        outer.addWidget(kicker)
+        heading = QLabel(tr("Podłącz konto Amazon"))
+        heading.setObjectName("PageTitle")
+        outer.addWidget(heading)
+        info = QLabel(
+            tr(
+                "1. Otwórz stronę logowania i zaloguj się na konto Amazon.\n"
+                "2. Po przekierowaniu skopiuj pełny adres URL z paska "
+                "przeglądarki (zawiera parametr openid.oa2.authorization_code).\n"
+                "3. Wklej go poniżej i zatwierdź. Amazon nie przekierowuje na "
+                "localhost, dlatego ten krok jest ręczny."
+            )
+        )
+        info.setObjectName("Muted")
+        info.setWordWrap(True)
+        outer.addWidget(info)
+
+        url_row = QHBoxLayout()
+        self.url_edit = QLineEdit()
+        self.url_edit.setReadOnly(True)
+        self.url_edit.setPlaceholderText(tr("Przygotowuję adres logowania..."))
+        url_row.addWidget(self.url_edit, 1)
+        self.open_button = QPushButton(tr("OTWÓRZ STRONĘ LOGOWANIA"))
+        self.open_button.setObjectName("GhostButton")
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self._open_url)
+        url_row.addWidget(self.open_button)
+        outer.addLayout(url_row)
+
+        self.redirect_edit = QLineEdit()
+        self.redirect_edit.setPlaceholderText(
+            tr("Wklej tutaj pełny URL przekierowania z parametrem kodu")
+        )
+        self.redirect_edit.setEnabled(False)
+        outer.addWidget(self.redirect_edit)
+
+        self.status_label = QLabel(tr("Przygotowuję logowanie..."))
+        self.status_label.setObjectName("Muted")
+        self.status_label.setWordWrap(True)
+        outer.addWidget(self.status_label)
+        outer.addStretch(1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if self.ok_button:
+            self.ok_button.setText(tr("ZALOGUJ"))
+            self.ok_button.setObjectName("PrimaryButton")
+            self.ok_button.setEnabled(False)
+        if cancel_button:
+            cancel_button.setText(tr("ANULUJ"))
+            cancel_button.setObjectName("GhostButton")
+        buttons.accepted.connect(self._submit)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+        self._begin_worker = amazon.NileBeginLoginWorker(str(self._binary), self)
+        self._begin_worker.result.connect(self._begin_ready)
+        self._begin_worker.start()
+
+    def _begin_ready(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        worker = self._begin_worker
+        self._begin_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if not data.get("ok"):
+            self.status_label.setText(str(data.get("error", tr("Logowanie nie powiodło się."))))
+            return
+        self._payload = data.get("data") or {}
+        url = str(self._payload.get("url", ""))
+        self.url_edit.setText(url)
+        self.open_button.setEnabled(bool(url))
+        self.redirect_edit.setEnabled(True)
+        if self.ok_button:
+            self.ok_button.setEnabled(True)
+        self.status_label.setText(
+            tr("Zaloguj się w przeglądarce, a następnie wklej URL przekierowania.")
+        )
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _open_url(self) -> None:
+        url = self.url_edit.text().strip()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _submit(self) -> None:
+        if self._finish_worker is not None:
+            return
+        pasted = self.redirect_edit.text().strip()
+        if not pasted:
+            QMessageBox.warning(
+                self,
+                tr("Amazon Games"),
+                tr("Wklej URL przekierowania z kodem autoryzacji."),
+            )
+            return
+        if self.ok_button:
+            self.ok_button.setEnabled(False)
+        self.redirect_edit.setEnabled(False)
+        self.open_button.setEnabled(False)
+        self.status_label.setText(tr("Rejestruję urządzenie i pobieram bibliotekę..."))
+        self._finish_worker = amazon.NileFinishLoginWorker(
+            str(self._binary), self._payload, pasted, self
+        )
+        self._finish_worker.result.connect(self._finish_ready)
+        self._finish_worker.start()
+
+    def _finish_ready(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        worker = self._finish_worker
+        self._finish_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if not data.get("ok"):
+            self.status_label.setText(str(data.get("error", tr("Logowanie nie powiodło się."))))
+            self.redirect_edit.setEnabled(True)
+            self.open_button.setEnabled(True)
+            if self.ok_button:
+                self.ok_button.setEnabled(True)
+            return
+        user = data.get("user") or {}
+        self.user = {
+            "name": str(user.get("name", "") or ""),
+            "user_id": str(user.get("user_id", "") or ""),
+        }
+        self.accept()
+
+    def reject(self) -> None:
+        if self._finish_worker is not None:
+            self.status_label.setText(tr("Trwa rejestracja urządzenia. Poczekaj..."))
+            return
+        if self._begin_worker is not None:
+            if not self._begin_worker.wait(4000):
+                self.status_label.setText(tr("Przygotowuję logowanie..."))
+                return
+            self._begin_worker = None
+        super().reject()
+
+
+class AmazonProgressDialog(QDialog):
+    """Streaming progress window for nile install/update/verify jobs."""
+
+    cancelled = pyqtSignal()
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self._running = True
+        self.setWindowTitle(title)
+        self.setWindowIcon(app_icon())
+        self.setModal(True)
+        self.resize(760, 420)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 16, 20, 16)
+        outer.setSpacing(10)
+        self.heading = QLabel(title)
+        self.heading.setObjectName("SectionTitle")
+        outer.addWidget(self.heading)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        outer.addWidget(self.progress_bar)
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("Muted")
+        self.meta_label.setWordWrap(True)
+        outer.addWidget(self.meta_label)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(500)
+        outer.addWidget(self.log_view, 1)
+        self.cancel_button = QPushButton(tr("ANULUJ"))
+        self.cancel_button.setObjectName("GhostButton")
+        self.cancel_button.clicked.connect(self._cancel_clicked)
+        outer.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignRight)
+
+    def set_status(self, text: str) -> None:
+        self.meta_label.setText(text)
+
+    def append_log(self, line: str) -> None:
+        self.log_view.appendPlainText(line)
+
+    def set_progress(self, data: object) -> None:
+        values = data if isinstance(data, dict) else {}
+        percent = values.get("percent")
+        if isinstance(percent, (int, float)):
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(int(percent))
+        parts: list[str] = []
+        if values.get("eta"):
+            parts.append(tr("ETA: {eta}", eta=values["eta"]))
+        if values.get("downloaded"):
+            parts.append(tr("Pobrano: {value}", value=values["downloaded"]))
+        if values.get("download_speed"):
+            parts.append(tr("Sieć: {value}/s", value=values["download_speed"]))
+        if values.get("disk_speed"):
+            parts.append(tr("Dysk: {value}/s", value=values["disk_speed"]))
+        if parts:
+            self.meta_label.setText("  //  ".join(parts))
+
+    def set_running(self, running: bool) -> None:
+        self._running = running
+        self.cancel_button.setText(tr("ANULUJ") if running else tr("ZAMKNIJ"))
+        self.cancel_button.setEnabled(True)
+
+    def _cancel_clicked(self) -> None:
+        if self._running:
+            self.cancelled.emit()
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.setText(tr("ANULOWANIE..."))
+        else:
+            self.accept()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._running:
+            self._cancel_clicked()
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        if self._running:
+            self._cancel_clicked()
+            return
+        super().reject()
+
+
+class AmazonPage(QWidget):
+    """Owned Amazon Games library with install/launch/maintenance actions."""
+
+    sync_requested = pyqtSignal()
+    login_requested = pyqtSignal()
+    logout_requested = pyqtSignal()
+    install_requested = pyqtSignal(str)
+    launch_requested = pyqtSignal(str)
+    uninstall_requested = pyqtSignal(str)
+    update_requested = pyqtSignal(str)
+    verify_requested = pyqtSignal(str)
+    open_folder_requested = pyqtSignal(str)
+    settings_requested = pyqtSignal()
+    cover_updated = pyqtSignal(str, str)
+    toast = pyqtSignal(str)
+
+    def __init__(self, database: Database, parent=None) -> None:
+        super().__init__(parent)
+        self.db = database
+        self._games: list[dict[str, Any]] = []
+        self._selected_id = ""
+        self._cover_worker: amazon.NileCoverWorker | None = None
+        self._updates: set[str] = set()
+        self._account_name = ""
+        self._logged_in = False
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(220)
+        self._search_timer.timeout.connect(self.reload)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 24, 28, 20)
+        outer.setSpacing(14)
+        header = QHBoxLayout()
+        heading_box = QVBoxLayout()
+        heading_box.setSpacing(2)
+        kicker = QLabel(tr("AMAZON // LIBRARY"))
+        kicker.setObjectName("PageKicker")
+        heading_box.addWidget(kicker)
+        heading = QLabel(tr("Biblioteka Amazon"))
+        heading.setObjectName("PageTitle")
+        heading_box.addWidget(heading)
+        header.addLayout(heading_box)
+        header.addStretch(1)
+        self.stats_label = QLabel(tr("0 GIER // 0 ZAINSTALOWANYCH"))
+        self.stats_label.setObjectName("StatsPill")
+        header.addWidget(self.stats_label)
+        self.account_button = QPushButton(tr("ZALOGUJ SIĘ"))
+        self.account_button.setObjectName("GhostButton")
+        self.account_button.clicked.connect(self._account_clicked)
+        header.addWidget(self.account_button)
+        settings_button = QPushButton(tr("USTAWIENIA AMAZON"))
+        settings_button.setObjectName("GhostButton")
+        settings_button.clicked.connect(self.settings_requested.emit)
+        header.addWidget(settings_button)
+        outer.addLayout(header)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(7)
+        self.search_edit = QLineEdit()
+        self.search_edit.setObjectName("Search")
+        self.search_edit.setPlaceholderText(tr("Szukaj w bibliotece Amazon..."))
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(lambda _text: self._search_timer.start())
+        toolbar.addWidget(self.search_edit, 1)
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItem(tr("Wszystkie gry"), None)
+        self.filter_combo.addItem(tr("Zainstalowane"), 1)
+        self.filter_combo.addItem(tr("Nie zainstalowane"), 0)
+        self.filter_combo.currentIndexChanged.connect(self.reload)
+        toolbar.addWidget(self.filter_combo)
+        self.sync_button = QPushButton(tr("↻  ODŚWIEŻ BIBLIOTEKĘ"))
+        self.sync_button.setObjectName("GhostButton")
+        self.sync_button.clicked.connect(self.sync_requested.emit)
+        toolbar.addWidget(self.sync_button)
+        outer.addLayout(toolbar)
+
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        self.table = QTreeWidget()
+        self.table.setObjectName("AmazonTable")
+        self.table.setHeaderLabels([tr("GRA"), tr("ROZMIAR"), tr("STATUS")])
+        self.table.setRootIsDecorated(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.table.setIconSize(QSize(34, 46))
+        self.table.setColumnWidth(0, 390)
+        self.table.setColumnWidth(1, 120)
+        self.table.header().setStretchLastSection(True)
+        self.table.currentItemChanged.connect(self._selection_changed)
+        self.table.itemDoubleClicked.connect(self._launch_item)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
+        body.addWidget(self.table, 1)
+
+        details = QFrame()
+        details.setObjectName("Panel")
+        details.setFixedWidth(360)
+        details_layout = QVBoxLayout(details)
+        details_layout.setContentsMargins(18, 16, 18, 16)
+        details_layout.setSpacing(9)
+        detail_kicker = QLabel(tr("WYBRANA GRA"))
+        detail_kicker.setObjectName("PageKicker")
+        details_layout.addWidget(detail_kicker)
+        self.cover = QLabel()
+        self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover.setFixedSize(220, 300)
+        self.cover.setObjectName("ConsoleCover")
+        details_layout.addWidget(self.cover, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.title = QLabel(tr("Wybierz grę"))
+        self.title.setObjectName("SectionTitle")
+        self.title.setWordWrap(True)
+        details_layout.addWidget(self.title)
+        self.developer = QLabel("")
+        self.developer.setObjectName("Muted")
+        details_layout.addWidget(self.developer)
+        self.status = QLabel("")
+        self.status.setObjectName("Muted")
+        details_layout.addWidget(self.status)
+        self.size_label = QLabel("")
+        self.size_label.setObjectName("Muted")
+        details_layout.addWidget(self.size_label)
+        self.product_label = QLabel("")
+        self.product_label.setObjectName("Muted")
+        self.product_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        details_layout.addWidget(self.product_label)
+        self.description = QLabel("")
+        self.description.setObjectName("Muted")
+        self.description.setWordWrap(True)
+        self.description.setMaximumHeight(110)
+        details_layout.addWidget(self.description)
+        details_layout.addStretch(1)
+        self.install_button = QPushButton(tr("ZAINSTALUJ"))
+        self.install_button.setObjectName("PrimaryButton")
+        self.install_button.clicked.connect(self._install_current)
+        details_layout.addWidget(self.install_button)
+        self.play_button = QPushButton(tr("▶  GRAJ"))
+        self.play_button.setObjectName("PrimaryButton")
+        self.play_button.clicked.connect(self._launch_current)
+        details_layout.addWidget(self.play_button)
+        maintenance = QHBoxLayout()
+        self.update_button = QPushButton(tr("AKTUALIZUJ"))
+        self.update_button.setObjectName("GhostButton")
+        self.update_button.clicked.connect(self._update_current)
+        maintenance.addWidget(self.update_button)
+        self.verify_button = QPushButton(tr("WERYFIKUJ"))
+        self.verify_button.setObjectName("GhostButton")
+        self.verify_button.clicked.connect(self._verify_current)
+        maintenance.addWidget(self.verify_button)
+        details_layout.addLayout(maintenance)
+        self.folder_button = QPushButton(tr("OTWÓRZ KATALOG GRY"))
+        self.folder_button.setObjectName("GhostButton")
+        self.folder_button.clicked.connect(self._folder_current)
+        details_layout.addWidget(self.folder_button)
+        self.uninstall_button = QPushButton(tr("ODINSTALUJ"))
+        self.uninstall_button.setObjectName("GhostButton")
+        self.uninstall_button.clicked.connect(self._uninstall_current)
+        details_layout.addWidget(self.uninstall_button)
+        body.addWidget(details)
+        outer.addLayout(body, 1)
+        self.reload()
+
+    def _filter_installed(self) -> int | None:
+        value = self.filter_combo.currentData()
+        return int(value) if value is not None else None
+
+    def set_account(self, name: str, logged_in: bool) -> None:
+        self._account_name = (name or "").strip()
+        self._logged_in = bool(logged_in)
+        if self._logged_in:
+            self.account_button.setText(
+                self._account_name or tr("WYLOGUJ Z AMAZON")
+            )
+            self.account_button.setToolTip(tr("Wyloguj z Amazon Games"))
+        else:
+            self.account_button.setText(tr("ZALOGUJ SIĘ"))
+            self.account_button.setToolTip(tr("Podłącz konto Amazon Games"))
+        self.reload()
+
+    def set_updates(self, product_ids: Iterable[str]) -> None:
+        self._updates = {str(item) for item in product_ids}
+        self.reload()
+
+    def _account_clicked(self) -> None:
+        if self._logged_in:
+            self.logout_requested.emit()
+        else:
+            self.login_requested.emit()
+
+    def reload(self) -> None:
+        search = self.search_edit.text().strip()
+        self._games = self.db.list_amazon_library(search, self._filter_installed())
+        stats = self.db.amazon_library_stats()
+        self.stats_label.setText(
+            tr(
+                "{total} GIER // {installed} ZAINSTALOWANYCH",
+                total=stats["total"],
+                installed=stats["installed"],
+            )
+        )
+        current = self._selected_id
+        self.table.blockSignals(True)
+        self.table.clear()
+        selected_item: QTreeWidgetItem | None = None
+        for game in self._games:
+            product_id = str(game.get("product_id", ""))
+            installed = bool(game.get("installed"))
+            status = tr("ZAINSTALOWANA") if installed else tr("W BIBLIOTECE")
+            if installed and product_id in self._updates:
+                status = tr("AKTUALIZACJA")
+            item = QTreeWidgetItem(
+                [
+                    str(game.get("title", "")),
+                    human_bytes(int(game.get("size", 0) or 0))
+                    if int(game.get("size", 0) or 0) > 0
+                    else "—",
+                    status,
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, product_id)
+            cover = Path(str(game.get("cover_path", "") or "")).expanduser()
+            if cover.is_file():
+                icon = QIcon(str(cover))
+                if not icon.isNull():
+                    item.setIcon(0, icon)
+            item.setToolTip(0, str(game.get("title", "")))
+            item.setToolTip(2, product_id)
+            self.table.addTopLevelItem(item)
+            if current and product_id == current:
+                selected_item = item
+        self.table.blockSignals(False)
+        if selected_item is not None:
+            self.table.setCurrentItem(selected_item)
+        elif self.table.topLevelItemCount():
+            self.table.setCurrentItem(self.table.topLevelItem(0))
+        else:
+            self._selected_id = ""
+            self.title.setText(tr("Brak gier w bibliotece Amazon"))
+            self.status.setText(
+                tr(
+                    "Zaloguj się do Amazon Games i odśwież bibliotekę. "
+                    "Integracja wymaga nile (Ustawienia → Amazon Games)."
+                )
+            )
+            self.developer.setText("")
+            self.size_label.setText("")
+            self.product_label.setText("")
+            self.description.setText("")
+            self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+            for button in (
+                self.install_button,
+                self.play_button,
+                self.update_button,
+                self.verify_button,
+                self.folder_button,
+                self.uninstall_button,
+            ):
+                button.hide()
+        if self.table.topLevelItemCount():
+            self._selection_changed(self.table.currentItem(), None)
+
+    def _selected_game(self) -> dict[str, Any] | None:
+        item = self.table.currentItem()
+        if item is None:
+            return None
+        product_id = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        return self.db.get_amazon_library_game(product_id) if product_id else None
+
+    def _selection_changed(
+        self, current: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None
+    ) -> None:
+        if current is None:
+            return
+        product_id = str(current.data(0, Qt.ItemDataRole.UserRole) or "")
+        game = self.db.get_amazon_library_game(product_id)
+        if game is None:
+            return
+        self._selected_id = product_id
+        installed = bool(game.get("installed"))
+        self.title.setText(str(game.get("title", "")))
+        self.developer.setText(str(game.get("developer", "")))
+        status = tr("Zainstalowana") if installed else tr("W bibliotece Amazon")
+        if installed and product_id in self._updates:
+            status = tr("Dostępna aktualizacja")
+        self.status.setText(status)
+        size = int(game.get("size", 0) or 0)
+        self.size_label.setText(
+            tr("Rozmiar: {size}", size=human_bytes(size))
+            if size > 0
+            else tr("Rozmiar: nieznany")
+        )
+        self.product_label.setText(
+            tr("ID: {product}", product=product_id)
+        )
+        self.description.setText(str(game.get("description", "") or ""))
+        self.install_button.setVisible(not installed)
+        self.play_button.setVisible(installed)
+        self.update_button.setVisible(installed)
+        self.verify_button.setVisible(installed)
+        self.folder_button.setVisible(installed)
+        self.uninstall_button.setVisible(installed)
+        self.folder_button.setEnabled(
+            bool(str(game.get("install_path", "") or "").strip())
+        )
+        cover = Path(str(game.get("cover_path", "") or "")).expanduser()
+        if cover.is_file():
+            icon = QIcon(str(cover))
+            if not icon.isNull():
+                self.cover.setPixmap(
+                    icon.pixmap(self.cover.size()).scaled(
+                        self.cover.size(),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                return
+        self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+        self._load_cover(product_id, str(game.get("cover_url", "") or ""))
+
+    def _load_cover(self, product_id: str, url: str) -> None:
+        if self._cover_worker is not None or not url:
+            return
+        self._cover_worker = amazon.NileCoverWorker(product_id, url, self)
+        self._cover_worker.result.connect(self._cover_ready)
+        self._cover_worker.start()
+
+    def _cover_ready(self, product_id: str, path: str) -> None:
+        worker = self._cover_worker
+        self._cover_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if path:
+            self.db.set_amazon_cover(product_id, path)
+            self.cover_updated.emit(product_id, path)
+            for index in range(self.table.topLevelItemCount()):
+                item = self.table.topLevelItem(index)
+                if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == product_id:
+                    icon = QIcon(path)
+                    if not icon.isNull():
+                        item.setIcon(0, icon)
+                    break
+            if product_id == self._selected_id:
+                icon = QIcon(path)
+                if not icon.isNull():
+                    self.cover.setPixmap(
+                        icon.pixmap(self.cover.size()).scaled(
+                            self.cover.size(),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+        if product_id != self._selected_id and self._selected_id:
+            game = self.db.get_amazon_library_game(self._selected_id)
+            if game and not game.get("cover_path"):
+                self._load_cover(
+                    self._selected_id, str(game.get("cover_url", "") or "")
+                )
+
+    def _install_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.install_requested.emit(str(game["product_id"]))
+
+    def _launch_current(self) -> None:
+        game = self._selected_game()
+        if game is not None and game.get("installed"):
+            self.launch_requested.emit(str(game["product_id"]))
+
+    def _update_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.update_requested.emit(str(game["product_id"]))
+
+    def _verify_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.verify_requested.emit(str(game["product_id"]))
+
+    def _uninstall_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.uninstall_requested.emit(str(game["product_id"]))
+
+    def _folder_current(self) -> None:
+        game = self._selected_game()
+        if game is not None:
+            self.open_folder_requested.emit(str(game["product_id"]))
+
+    def _launch_item(self, item: QTreeWidgetItem) -> None:
+        product_id = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+        game = self.db.get_amazon_library_game(product_id) if product_id else None
+        if game is None:
+            return
+        if game.get("installed"):
+            self.launch_requested.emit(product_id)
+        else:
+            self.install_requested.emit(product_id)
+
+    def _context_menu(self, position) -> None:
+        item = self.table.itemAt(position)
+        if item is None:
+            return
+        self.table.setCurrentItem(item)
+        game = self._selected_game()
+        if game is None:
+            return
+        product_id = str(game.get("product_id", ""))
+        installed = bool(game.get("installed"))
+        menu = QMenu(self)
+        if installed:
+            launch = menu.addAction(tr("▶  Uruchom grę"))
+            launch.triggered.connect(lambda: self.launch_requested.emit(product_id))
+            update = menu.addAction(tr("↻  Aktualizuj"))
+            update.triggered.connect(lambda: self.update_requested.emit(product_id))
+            verify = menu.addAction(tr("🛠  Weryfikuj pliki"))
+            verify.triggered.connect(lambda: self.verify_requested.emit(product_id))
+            folder = menu.addAction(tr("Otwórz katalog gry"))
+            folder.triggered.connect(
+                lambda: self.open_folder_requested.emit(product_id)
+            )
+            menu.addSeparator()
+            uninstall = menu.addAction(tr("×  Odinstaluj"))
+            uninstall.triggered.connect(
+                lambda: self.uninstall_requested.emit(product_id)
+            )
+        else:
+            install = menu.addAction(tr("Zainstaluj"))
+            install.triggered.connect(lambda: self.install_requested.emit(product_id))
+        menu.addSeparator()
+        copy_id = menu.addAction(tr("⧉  Kopiuj ID produktu"))
+        copy_id.triggered.connect(
+            lambda: QApplication.clipboard().setText(product_id)
+        )
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def set_sync_busy(self, busy: bool) -> None:
+        self.sync_button.setEnabled(not busy)
+        self.search_edit.setEnabled(not busy)
+
+    def focus_search(self) -> None:
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
+
+    def shutdown(self) -> None:
+        if self._cover_worker is not None:
+            self._cover_worker.wait(5000)
+            self._cover_worker = None
+
+
 def write_runtime_file(
     database: Database,
     game: dict[str, Any],
@@ -4294,26 +5180,39 @@ def write_runtime_file(
     *,
     direct: bool = False,
     use_prefix: bool = True,
+    extra_env: dict[str, str] | None = None,
+    working_dir: str | None = None,
 ) -> Path:
     """Build the shell-quoted runtime file consumed by launcher.sh.
 
     ``direct`` is used by the Steam wrapper: Steam has already constructed the
     wine/proton command, so launcher.sh must not prepend another Wine binary.
+
+    ``command`` may also be supplied in normal (non-direct) mode.  This is used
+    by Amazon Games: nile resolves the real EXE and its arguments, while
+    launcher.sh still prepends Boostlayer's selected Wine/Proton runner.
     """
     if direct and not command:
         raise RuntimeError(tr("Brak komendy przekazanej przez Steam."))
 
     exe = Path(str(game.get("exe_path", ""))).expanduser()
+    command_exe = (
+        Path(str(command[0])).expanduser() if command and command[0] else None
+    )
     prefix: Path | None = None
     runner = None
     proton = None
     if not direct:
-        if not exe.is_file():
-            raise RuntimeError(tr("Plik EXE nie istnieje:\n{path}", path=exe))
+        target = command_exe or exe
+        if not target.is_file():
+            raise RuntimeError(tr("Plik EXE nie istnieje:\n{path}", path=target))
         try:
-            exe = exe.resolve()
+            target = target.resolve()
         except OSError:
             pass
+        exe = target
+        if command:
+            command = [str(target), *[str(item) for item in command[1:]]]
         runner = resolve_runner(
             str(game.get("runner_path", "")),
             str(database.get_setting("default_runner", "")),
@@ -4339,6 +5238,10 @@ def write_runtime_file(
                 pass
 
     env = parse_env_vars(str(game.get("env_vars", "")))
+    if extra_env:
+        # Explicit launcher environment (Amazon SDK/FUEL) first; user-provided
+        # per-game variables keep the final say.
+        env = {**{str(k): str(v) for k, v in extra_env.items()}, **env}
     if direct:
         if game.get("steam_appid"):
             env.setdefault("SteamAppId", str(game["steam_appid"]))
@@ -4382,9 +5285,12 @@ def write_runtime_file(
     if direct:
         full_command = list(command or []) + launch_args
         workdir = ""
+    elif command:
+        full_command = list(command) + launch_args
+        workdir = working_dir or str(Path(command[0]).parent)
     else:
         full_command = [str(exe)] + launch_args
-        workdir = str(exe.parent)
+        workdir = working_dir or str(exe.parent)
 
     game_bits = exe_bits(str(game.get("exe_path", "")))
     if game_bits is None and command:
@@ -4468,6 +5374,27 @@ class MainWindow(QMainWindow):
         self._steam_install_pending: set[str] = set()
         self._steam_install_timer: QTimer | None = None
         self._steam_install_ticks = 0
+        self._amazon_setup_worker: amazon.NileSetupWorker | None = None
+        self._amazon_sync_worker: amazon.NileSyncWorker | None = None
+        self._amazon_job_worker: amazon.NileJobWorker | None = None
+        self._amazon_job_dialog: AmazonProgressDialog | None = None
+        self._amazon_spec_worker: amazon.NileSpecWorker | None = None
+        self._amazon_pending_game: dict[str, Any] | None = None
+        self._amazon_spec_purpose = ""
+        self._amazon_spec_product = ""
+        self._amazon_logout_worker: amazon.NileLogoutWorker | None = None
+        self._store_setup_workers: dict[str, stores.StoreSetupWorker] = {}
+        self._store_sync_workers: dict[str, stores.StoreSyncWorker] = {}
+        self._store_job_workers: dict[str, stores.StoreJobWorker] = {}
+        self._store_job_dialogs: dict[str, store_ui.StoreProgressDialog] = {}
+        self._store_spec_workers: dict[str, stores.StoreSpecWorker] = {}
+        self._store_spec_purposes: dict[str, str] = {}
+        self._store_spec_games: dict[str, dict[str, Any]] = {}
+        self._store_logout_workers: dict[str, stores.StoreLogoutWorker] = {}
+        self._store_cover_workers: dict[str, stores.StoreCoverBatchWorker] = {}
+        self._store_size_workers: dict[str, stores.StoreSizeBatchWorker] = {}
+        self._steam_cover_batch_worker: SteamCoverBatchWorker | None = None
+        self._gog_locate_prompted: set[str] = set()
         self.console: ConsoleWindow | None = None
         self._steam_pending: tuple[
             SteamOptionsWorker,
@@ -4496,6 +5423,7 @@ class MainWindow(QMainWindow):
         self._restore_geometry()
         self._refresh_all()
         self._update_sidebar_state()
+        QTimer.singleShot(1200, self._prefetch_cached_assets)
 
     # ------------------------------------------------------------------- layout
     def _build_ui(self) -> None:
@@ -4526,7 +5454,7 @@ class MainWindow(QMainWindow):
         self.nav_group.setExclusive(True)
         menu_items = (
             (tr("01   BIBLIOTEKA"), 0),
-            (tr("02   STEAM"), 1),
+            (tr("02   SKLEPY"), 1),
             (tr("03   USTAWIENIA"), 2),
             (tr("04   RUNNERY"), 3),
             (tr("05   MANGOHUD"), 4),
@@ -4561,12 +5489,13 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.library_page = LibraryPage(self.db)
         self.steam_page = SteamPage(self.db)
+        self.stores_page = store_ui.StoresPage(self.db, self.steam_page)
         self.settings_page = SettingsPage(self.db)
         self.runner_page = RunnerPage(self.db)
         self.mango_page = MangoPage(self.db)
         for page in (
             self.library_page,
-            self.steam_page,
+            self.stores_page,
             self.settings_page,
             self.runner_page,
             self.mango_page,
@@ -4590,8 +5519,26 @@ class MainWindow(QMainWindow):
         self.steam_page.launch_requested.connect(self.launch_steam_game)
         self.steam_page.store_requested.connect(self.open_steam_store)
         self.steam_page.settings_requested.connect(self._open_steam_settings)
+        for page in self.stores_page.pages.values():
+            page.toast.connect(self.toast)
+            page.sync_requested.connect(self.sync_store)
+            page.login_requested.connect(self.login_store)
+            page.logout_requested.connect(self.logout_store)
+            page.install_requested.connect(self.install_store_game)
+            page.launch_requested.connect(self.launch_store_game)
+            page.uninstall_requested.connect(self.uninstall_store_game)
+            page.update_requested.connect(self.update_store_game)
+            page.verify_requested.connect(self.verify_store_game)
+            page.open_folder_requested.connect(self.open_store_folder)
+            page.locate_requested.connect(self._locate_store_game)
+            page.settings_requested.connect(self._open_store_settings)
+            page.cover_updated.connect(self._store_cover_updated)
         self.settings_page.toast.connect(self.toast)
         self.settings_page.steam_sync_requested.connect(self.sync_steam)
+        self.settings_page.store_setup_requested.connect(self.setup_store)
+        self.settings_page.store_login_requested.connect(self.login_store)
+        self.settings_page.store_logout_requested.connect(self.logout_store)
+        self.settings_page.store_library_sync_requested.connect(self.sync_store)
         self.settings_page.steam_library_sync_requested.connect(
             self.sync_steam_library
         )
@@ -4635,6 +5582,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+R", self._refresh_all),
             ("Ctrl+F", self.library_page.focus_search),
             ("F5", self.sync_steam),
+            ("Ctrl+Shift+A", lambda: self.sync_store("amazon")),
             ("Ctrl+L", self.show_last_run_log),
         )
         for sequence, callback in shortcuts:
@@ -4652,6 +5600,11 @@ class MainWindow(QMainWindow):
         sync_action.setShortcut(QKeySequence("F5"))
         sync_action.triggered.connect(self.sync_steam)
         self.app_menu.addAction(sync_action)
+
+        amazon_sync_action = QAction(tr("Synchronizuj Amazon"), self)
+        amazon_sync_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        amazon_sync_action.triggered.connect(lambda: self.sync_store("amazon"))
+        self.app_menu.addAction(amazon_sync_action)
 
         minimal_action = QAction(tr("Tryb minimalny / tray"), self)
         minimal_action.triggered.connect(self._show_minimal)
@@ -4833,6 +5786,10 @@ class MainWindow(QMainWindow):
         self._open_settings_page()
         self.settings_page.focus_steam_settings()
 
+    def _open_amazon_settings(self) -> None:
+        self._open_settings_page()
+        self.settings_page.focus_amazon_settings()
+
     def open_console(self) -> None:
         if self.console is None:
             self.console = ConsoleWindow(self.db)
@@ -4968,8 +5925,15 @@ class MainWindow(QMainWindow):
 
     def _refresh_all(self) -> None:
         self.library_page.reload()
-        self.steam_page.reload()
+        self.stores_page.reload()
+        for store_id, adapter in stores.STORES.items():
+            user = adapter.current_user()
+            self.stores_page.set_account(
+                store_id, str(user.get("name", "") or ""), bool(user.get("name"))
+            )
         self.settings_page.refresh_runners()
+        for panel in self.settings_page.store_settings_panels.values():
+            panel.refresh_status()
         self.runner_page.refresh()
         if self.console is not None:
             self.console.reload()
@@ -5027,8 +5991,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "nav_group", None) is not None:
             self.nav_group.deleteLater()
             self.nav_group = None
-        if getattr(self, "steam_page", None) is not None:
-            self.steam_page.shutdown()
+        if getattr(self, "stores_page", None) is not None:
+            self._cancel_all_asset_workers()
+            self.stores_page.shutdown()
         central = self.takeCentralWidget()
         if central is not None:
             central.deleteLater()
@@ -5095,6 +6060,28 @@ class MainWindow(QMainWindow):
         game = self.db.get_game(game_id)
         if not game:
             return
+        store = str(game.get("store", "") or "").strip()
+        if not store and game.get("is_amazon"):
+            store = "amazon"
+        if store in stores.STORES:
+            answer = QMessageBox.question(
+                self,
+                tr("Usuń grę ze sklepu"),
+                tr(
+                    "Usunąć „{name}” z biblioteki?\n\n"
+                    "Pliki gry pozostaną na dysku. Pełne odinstalowanie "
+                    "uruchomisz z zakładki SKLEPY.",
+                    name=game["name"],
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.db.delete_game(game_id)
+            self.library_page.reload()
+            self._refresh_tray_menu()
+            self.toast(tr("Wpis sklepu usunięty z biblioteki."))
+            return
         answer = QMessageBox.question(
             self,
             tr("Usuń grę"),
@@ -5127,7 +6114,27 @@ class MainWindow(QMainWindow):
             copy_option.triggered.connect(lambda: self._copy_steam_option_for())
             repair = menu.addAction(tr("🛠  Napraw opcję uruchamiania Steam"))
             repair.triggered.connect(lambda: self.repair_steam_options(game_id))
-        menu.addSeparator()
+        store_id = str(game.get("store", "") or "").strip()
+        if store_id in stores.STORES:
+            game_id = str(game.get("store_id", "") or "")
+            update = menu.addAction(tr("↻  Aktualizuj"))
+            update.triggered.connect(
+                lambda: self.update_store_game(store_id, game_id)
+            )
+            verify = menu.addAction(tr("🛠  Weryfikuj pliki"))
+            verify.triggered.connect(
+                lambda: self.verify_store_game(store_id, game_id)
+            )
+            uninstall = menu.addAction(tr("⇩  Odinstaluj"))
+            uninstall.triggered.connect(
+                lambda: self.uninstall_store_game(store_id, game_id)
+            )
+            if store_id == "gog":
+                locate = menu.addAction(tr("Wskaż folder gry GOG"))
+                locate.triggered.connect(
+                    lambda: self._locate_store_game("gog", game_id)
+                )
+            menu.addSeparator()
         folder = menu.addAction(tr("Otwórz katalog gry"))
         folder_target = Path(str(game.get("exe_path", ""))).expanduser()
         if folder_target.is_file():
@@ -5196,6 +6203,7 @@ class MainWindow(QMainWindow):
             self.library_page.reload()
             self.settings_page.reload()
             self._refresh_tray_menu()
+            self._start_steam_covers()
             self.toast(
                 tr(
                     "Steam: +{added} nowych, {updated} zaktualizowanych, "
@@ -5286,6 +6294,7 @@ class MainWindow(QMainWindow):
         self.db.set_setting("steam_library_synced", synced)
         self.steam_page.reload()
         self.settings_page.reload()
+        self._start_steam_covers()
         self.toast(
             tr("Biblioteka Steam: pobrano {count} gier.", count=len(games))
         )
@@ -5297,6 +6306,1720 @@ class MainWindow(QMainWindow):
         self.status_label.setText(tr("GOTOWY"))
         if worker is not None:
             worker.deleteLater()
+
+    # ------------------------------------------------------------- storefronts
+    def _store_adapter(self, store: str) -> stores.StoreAdapter | None:
+        return stores.STORES.get(store)
+
+    def _store_busy(self, store: str) -> bool:
+        for workers in (
+            self._store_setup_workers,
+            self._store_sync_workers,
+            self._store_job_workers,
+            self._store_spec_workers,
+        ):
+            worker = workers.get(store)
+            if worker is not None and worker.isRunning():
+                return True
+        return False
+
+    def _store_binary(self, store: str, prompt: bool = True) -> Path | None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return None
+        binary = adapter.tool_binary(self.db)
+        if binary is not None:
+            return binary
+        if prompt:
+            answer = QMessageBox.question(
+                self,
+                adapter.label,
+                tr(
+                    "Nie znaleziono narzędzia {store}. Pobrać je teraz?",
+                    store=adapter.label,
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.setup_store(store)
+        return None
+
+    def setup_store(self, store: str) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if store in self._store_setup_workers:
+            self.toast(tr("Pobieranie narzędzia już trwa."))
+            return
+        self.settings_page.set_busy(True)
+        self.status_label.setText(
+            tr("Pobieram narzędzie {store}...", store=adapter.label)
+        )
+        worker = stores.StoreSetupWorker(adapter, self)
+        self._store_setup_workers[store] = worker
+        worker.status.connect(self.status_label.setText)
+        worker.result.connect(
+            lambda payload: self._store_setup_result(store, payload)
+        )
+        worker.finished.connect(
+            lambda: self._store_setup_finished(store)
+        )
+        worker.start()
+
+    def _store_setup_result(self, store: str, payload: object) -> None:
+        adapter = self._store_adapter(store)
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                adapter.label if adapter else store,
+                str(data.get("error", tr("Nie udało się pobrać narzędzia."))),
+            )
+            return
+        panel = self.settings_page.store_settings_panels.get(store)
+        if panel is not None:
+            panel.refresh_status()
+        self.toast(
+            tr(
+                "Narzędzie {store} gotowe: {version}",
+                store=adapter.label if adapter else store,
+                version=data.get("version") or "?",
+            )
+        )
+        self.status_label.setText(tr("Narzędzie gotowe."))
+
+    def _store_setup_finished(self, store: str) -> None:
+        self.settings_page.set_busy(False)
+        worker = self._store_setup_workers.pop(store, None)
+        if worker is not None:
+            worker.deleteLater()
+
+    def login_store(self, store: str) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if self._store_busy(store):
+            self.toast(tr("Operacja sklepu już trwa."))
+            return
+        binary = self._store_binary(store)
+        if binary is None:
+            return
+        user = adapter.current_user()
+        if user.get("name"):
+            QMessageBox.information(
+                self,
+                adapter.label,
+                tr("Jesteś już zalogowany jako {name}.", name=user["name"]),
+            )
+            return
+        try:
+            dialog = store_ui.StoreLoginDialog(adapter, self.db, self)
+        except stores.StoreError as exc:
+            QMessageBox.warning(self, adapter.label, str(exc))
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dialog.user.get("name", "")
+        self.stores_page.set_account(store, name, True)
+        panel = self.settings_page.store_settings_panels.get(store)
+        if panel is not None:
+            panel.refresh_status()
+        self.toast(
+            tr("Zalogowano do {store}: {name}", store=adapter.label, name=name or "?")
+        )
+        self.sync_store(store)
+
+    def logout_store(self, store: str) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if store in self._store_logout_workers:
+            self.toast(tr("Wylogowanie już trwa."))
+            return
+        if self._store_busy(store):
+            self.toast(tr("Operacja sklepu już trwa."))
+            return
+        binary = self._store_binary(store)
+        if binary is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            adapter.label,
+            tr(
+                "Wylogować z {store}?\n\nWpisy sklepu zostaną usunięte z "
+                "biblioteki, ale pliki zainstalowanych gier pozostaną na dysku.",
+                store=adapter.label,
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_label.setText(tr("Wylogowuję z {store}...", store=adapter.label))
+        worker = stores.StoreLogoutWorker(adapter, str(binary), self)
+        self._store_logout_workers[store] = worker
+        worker.result.connect(
+            lambda payload: self._store_logout_result(store, payload)
+        )
+        worker.finished.connect(
+            lambda: self._store_logout_finished(store)
+        )
+        worker.start()
+
+    def _store_logout_result(self, store: str, payload: object) -> None:
+        adapter = self._store_adapter(store)
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                adapter.label if adapter else store,
+                str(data.get("error", tr("Wylogowanie nie powiodło się."))),
+            )
+            return
+        self._cancel_store_assets(store)
+        self.db.clear_store_library(store)
+        self.db.delete_store_games(store)
+        self.db.set_setting(f"{store}_library_synced", "")
+        if store == "amazon":
+            self.db.clear_amazon_library()
+            self.db.delete_amazon_games()
+        self.stores_page.set_account(store, "", False)
+        self.stores_page.set_updates(store, [])
+        self.library_page.reload()
+        panel = self.settings_page.store_settings_panels.get(store)
+        if panel is not None:
+            panel.refresh_status()
+        self._refresh_tray_menu()
+        self.toast(
+            tr("Wylogowano z {store}.", store=adapter.label if adapter else store)
+        )
+
+    def _store_logout_finished(self, store: str) -> None:
+        worker = self._store_logout_workers.pop(store, None)
+        if worker is not None:
+            worker.deleteLater()
+        self.status_label.setText(tr("GOTOWY"))
+
+    def sync_store(self, store: str) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if store in self._store_sync_workers:
+            self.toast(tr("Synchronizacja sklepu już trwa."))
+            return
+        if self._store_busy(store):
+            self.toast(tr("Operacja sklepu już trwa."))
+            return
+        binary = self._store_binary(store)
+        if binary is None:
+            return
+        installed = {
+            str(item.get("store_id", "")): item
+            for item in self.db.list_store_library(store)
+        }
+        self.stores_page.set_sync_busy(store, True)
+        self.settings_page.set_busy(True)
+        self.status_label.setText(
+            tr("Synchronizuję bibliotekę {store}...", store=adapter.label)
+        )
+        worker = stores.StoreSyncWorker(adapter, str(binary), installed, self)
+        self._store_sync_workers[store] = worker
+        worker.status.connect(self.status_label.setText)
+        worker.result.connect(
+            lambda payload: self._store_sync_result(store, payload)
+        )
+        worker.finished.connect(
+            lambda: self._store_sync_finished(store)
+        )
+        worker.start()
+
+    def _store_sync_result(self, store: str, payload: object) -> None:
+        adapter = self._store_adapter(store)
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                adapter.label if adapter else store,
+                str(data.get("error", tr("Nieznany błąd synchronizacji."))),
+            )
+            return
+        games = [item for item in (data.get("games") or []) if isinstance(item, dict)]
+        synced = time.strftime("%Y-%m-%d %H:%M")
+        self.db.replace_store_library(store, games, synced)
+        self.db.set_setting(f"{store}_library_synced", synced)
+        installed_ids = {
+            str(item.get("store_id", ""))
+            for item in games
+            if item.get("installed")
+        }
+        for item in games:
+            if item.get("installed"):
+                self._store_upsert_row(store, item)
+        removed = 0
+        for existing in self.db.list_games():
+            if str(existing.get("store", "") or "") != store:
+                continue
+            store_id = str(existing.get("store_id", "") or "")
+            if store_id and store_id not in installed_ids:
+                self.db.delete_game(int(existing["id"]))
+                removed += 1
+        username = str(data.get("username", "") or "")
+        self.stores_page.set_account(store, username, True)
+        self.stores_page.set_updates(store, data.get("updates") or [])
+        self.stores_page.reload()
+        self.library_page.reload()
+        panel = self.settings_page.store_settings_panels.get(store)
+        if panel is not None:
+            panel.refresh_status()
+        self._refresh_tray_menu()
+        if self.console is not None:
+            self.console.reload()
+        self.toast(
+            tr(
+                "{store}: {count} gier w bibliotece, {installed} zainstalowanych.",
+                store=adapter.label if adapter else store,
+                count=len(games),
+                installed=len(installed_ids),
+            )
+        )
+        if removed:
+            self.toast(
+                tr(
+                    "Usunięto {count} nieaktualnych wpisów sklepu z biblioteki.",
+                    count=removed,
+                )
+            )
+
+        self._start_store_assets(store, self.db.list_store_library(store))
+
+    def _store_sync_finished(self, store: str) -> None:
+        worker = self._store_sync_workers.pop(store, None)
+        self.stores_page.set_sync_busy(store, False)
+        self.settings_page.set_busy(False)
+        self.status_label.setText(tr("GOTOWY"))
+        if worker is not None:
+            worker.deleteLater()
+
+    def _cancel_store_assets(
+        self, store: str, *, covers: bool = True, sizes: bool = True
+    ) -> None:
+        if covers:
+            worker = self._store_cover_workers.pop(store, None)
+            if worker is not None:
+                worker.cancel()
+                worker.wait(3000)
+                worker.deleteLater()
+        if sizes:
+            worker = self._store_size_workers.pop(store, None)
+            if worker is not None:
+                worker.cancel()
+                worker.wait(3000)
+                worker.deleteLater()
+
+    def _start_store_assets(
+        self, store: str, games: list[dict[str, Any]]
+    ) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None or not games:
+            return
+        if self.db.get_bool("prefetch_covers", True):
+            missing = [
+                game
+                for game in games
+                if not str(game.get("cover_path", "") or "").strip()
+                and str(game.get("cover_url", "") or "").strip()
+            ]
+            if missing:
+                self._cancel_store_assets(store, covers=True, sizes=False)
+                worker = stores.StoreCoverBatchWorker(adapter, missing, self)
+                self._store_cover_workers[store] = worker
+                worker.progress.connect(self.status_label.setText)
+                worker.cover_ready.connect(self._store_cover_ready)
+                worker.done.connect(
+                    lambda s=store: self._store_covers_done(s)
+                )
+                worker.start()
+        if self.db.get_bool("prefetch_sizes", True):
+            binary = adapter.tool_binary(self.db)
+            missing = [
+                game
+                for game in games
+                if int(game.get("size", 0) or 0) <= 0
+            ]
+            if binary is not None and missing:
+                self._cancel_store_assets(store, covers=False, sizes=True)
+                worker = stores.StoreSizeBatchWorker(
+                    adapter, str(binary), missing, self
+                )
+                self._store_size_workers[store] = worker
+                worker.progress.connect(self.status_label.setText)
+                worker.size_ready.connect(self._store_size_ready)
+                worker.done.connect(
+                    lambda s=store: self._store_sizes_done(s)
+                )
+                worker.start()
+
+    def _store_cover_ready(self, store: str, store_id: str, path: str) -> None:
+        if not path:
+            return
+        self.db.set_store_cover(store, store_id, path)
+        page = self.stores_page.pages.get(store)
+        if page is not None:
+            page.update_cover(store_id, path)
+        game = self.db.find_store_game(store, store_id)
+        if game is not None:
+            self.db.update_game(int(game["id"]), cover_path=path)
+
+    def _store_covers_done(self, store: str) -> None:
+        worker = self._store_cover_workers.pop(store, None)
+        if worker is not None:
+            worker.deleteLater()
+        self.library_page.reload()
+        self._refresh_tray_menu()
+        self.status_label.setText(tr("GOTOWY"))
+
+    def _store_size_ready(self, store: str, store_id: str, size: int) -> None:
+        self.db.set_store_size(store, store_id, size)
+        page = self.stores_page.pages.get(store)
+        if page is not None:
+            page.update_size(store_id, size)
+
+    def _store_sizes_done(self, store: str) -> None:
+        worker = self._store_size_workers.pop(store, None)
+        if worker is not None:
+            worker.deleteLater()
+        self.status_label.setText(tr("GOTOWY"))
+
+    def _start_steam_covers(self) -> None:
+        if not self.db.get_bool("prefetch_covers", True):
+            return
+        if self._steam_cover_batch_worker is not None:
+            return
+        root = detect_steam_root(self.db.get_setting("steam_path").strip())
+        if root is None:
+            return
+        appids = [
+            str(game.get("appid", ""))
+            for game in self.db.list_steam_library()
+            if not str(game.get("cover_path", "") or "").strip()
+        ]
+        appids = [appid for appid in appids if appid]
+        if not appids:
+            return
+        worker = SteamCoverBatchWorker(appids, root, self)
+        self._steam_cover_batch_worker = worker
+        worker.progress.connect(self.status_label.setText)
+        worker.cover_ready.connect(self._steam_cover_ready)
+        worker.done.connect(self._steam_covers_done)
+        worker.start()
+
+    def _steam_cover_ready(self, appid: str, path: str) -> None:
+        if not path:
+            return
+        self.db.set_steam_cover(appid, path)
+        self.steam_page.update_cover(appid, path)
+        game = self.db.find_steam_game(appid)
+        if game is not None:
+            self.db.update_game(int(game["id"]), cover_path=path)
+
+    def _steam_covers_done(self) -> None:
+        worker = self._steam_cover_batch_worker
+        self._steam_cover_batch_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.library_page.reload()
+        self._refresh_tray_menu()
+        self.status_label.setText(tr("GOTOWY"))
+
+    def _prefetch_cached_assets(self) -> None:
+        for store in stores.STORES:
+            if store in self._store_sync_workers or store in self._store_job_workers:
+                continue
+            self._start_store_assets(store, self.db.list_store_library(store))
+        self._start_steam_covers()
+
+    def _cancel_all_asset_workers(self) -> None:
+        for store in list(self._store_cover_workers):
+            self._cancel_store_assets(store, covers=True, sizes=False)
+        for store in list(self._store_size_workers):
+            self._cancel_store_assets(store, covers=False, sizes=True)
+        worker = self._steam_cover_batch_worker
+        self._steam_cover_batch_worker = None
+        if worker is not None:
+            worker.cancel()
+            worker.wait(3000)
+            worker.deleteLater()
+
+    def _store_upsert_row(self, store: str, item: dict[str, Any]) -> None:
+        store_id = str(item.get("store_id", "") or "").strip()
+        if not store_id:
+            return
+        record = self.db.get_store_library_game(store, store_id) or item
+        existing = self.db.find_store_game(store, store_id)
+        spec: dict[str, Any] = {}
+        spec_json = str(item.get("spec_json", "") or (record or {}).get("spec_json", "") or "")
+        if spec_json:
+            try:
+                parsed = json.loads(spec_json)
+                if isinstance(parsed, dict):
+                    spec = parsed
+            except (TypeError, ValueError):
+                spec = {}
+        exe = str(spec.get("command") or (existing or {}).get("exe_path") or "")
+        if not exe:
+            return
+        cover = str(record.get("cover_path") or (existing or {}).get("cover_path") or "")
+        values: dict[str, Any] = {
+            "name": str(record.get("title") or item.get("title") or store_id),
+            "exe_path": exe,
+            "cover_path": cover,
+            "store_id": store_id,
+        }
+        if store == "amazon":
+            values["is_amazon"] = 1
+            values["amazon_id"] = store_id
+        if existing is None:
+            values.update(
+                {
+                    "runner_path": "",
+                    "wine_prefix": "",
+                    "env_vars": "",
+                    "launch_args": "",
+                    "scaling_mode": "native",
+                    "fps_limit": 0,
+                    "winetricks_verbs": "",
+                    "winetricks_auto": 0,
+                    "winetricks_state": "",
+                }
+            )
+        self.db.upsert_store_game(store, **values)
+        if spec_json:
+            self.db.set_store_spec(store, store_id, spec_json)
+
+    def _store_cover_updated(self, store: str, store_id: str, path: str) -> None:
+        game = self.db.find_store_game(store, store_id)
+        if game is None:
+            return
+        self.db.update_game(int(game["id"]), cover_path=path)
+        self.library_page.reload()
+        self._refresh_tray_menu()
+
+    @staticmethod
+    def _store_third_party(record: dict[str, Any]) -> str:
+        try:
+            data = json.loads(str(record.get("extra_json", "") or "{}"))
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        return str(data.get("third_party_store", "") or "")
+
+    def _warn_third_party(self, record: dict[str, Any], store_label: str) -> bool:
+        third_party = self._store_third_party(record)
+        if not third_party:
+            return False
+        QMessageBox.information(
+            self,
+            store_label,
+            tr(
+                "Ta gra wymaga zewnętrznego klienta ({client}). "
+                "Zainstaluj ją i uruchom w tym kliencie.",
+                client=third_party.upper(),
+            ),
+        )
+        return True
+
+    def install_store_game(self, store: str, game_id: str) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if store in self._store_job_workers:
+            self.toast(tr("Operacja sklepu już trwa."))
+            return
+        binary = self._store_binary(store)
+        if binary is None:
+            return
+        record = self.db.get_store_library_game(store, game_id)
+        if record is None:
+            self.toast(tr("Nie znaleziono gry w bibliotece sklepu."))
+            return
+        if record.get("installed"):
+            self.toast(tr("Ta gra jest już zainstalowana."))
+            return
+        if self._warn_third_party(record, adapter.label):
+            return
+        default_path = adapter.default_install_dir(self.db) / stores.safe_slug(
+            str(record.get("title", game_id))
+        )
+        dialog = store_ui.InstallDirDialog(
+            adapter.label, str(record.get("title", game_id)), default_path, self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        target = dialog.selected_path()
+        remember = dialog.remember_base()
+        if remember:
+            self.db.set_setting(adapter.install_setting, remember)
+            panel = self.settings_page.store_settings_panels.get(store)
+            if panel is not None:
+                panel.reload()
+        self._start_store_job(
+            store, "install", game_id, target_path=target
+        )
+
+    def update_store_game(self, store: str, game_id: str) -> None:
+        record = self.db.get_store_library_game(store, game_id)
+        if record is None or not record.get("installed"):
+            self.toast(tr("Najpierw zainstaluj grę."))
+            return
+        self._start_store_job(
+            store,
+            "update",
+            game_id,
+            install_path=str(record.get("install_path", "") or ""),
+        )
+
+    def verify_store_game(self, store: str, game_id: str) -> None:
+        record = self.db.get_store_library_game(store, game_id)
+        if record is None or not record.get("installed"):
+            self.toast(tr("Najpierw zainstaluj grę."))
+            return
+        install_path = str(record.get("install_path", "") or "").strip()
+        if not install_path:
+            self.toast(tr("Nieznana ścieżka instalacji gry."))
+            return
+        self._start_store_job(
+            store, "verify", game_id, install_path=install_path
+        )
+
+    def uninstall_store_game(self, store: str, game_id: str) -> None:
+        adapter = self._store_adapter(store)
+        record = self.db.get_store_library_game(store, game_id)
+        if adapter is None or record is None:
+            self.toast(tr("Nie znaleziono gry w bibliotece sklepu."))
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Odinstaluj grę"),
+            tr(
+                "Odinstalować „{name}”?\n\nPliki gry zostaną usunięte, a wpis "
+                "zniknie z biblioteki. WINEPREFIX pozostanie na dysku.",
+                name=record.get("title", game_id),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_store_job(
+            store,
+            "uninstall",
+            game_id,
+            install_path=str(record.get("install_path", "") or ""),
+        )
+
+    def _start_store_job(
+        self,
+        store: str,
+        action: str,
+        game_id: str,
+        *,
+        target_path: str = "",
+        install_path: str = "",
+    ) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if store in self._store_job_workers:
+            self.toast(tr("Operacja sklepu już trwa."))
+            return
+        binary = self._store_binary(store)
+        if binary is None:
+            return
+        record = self.db.get_store_library_game(store, game_id)
+        name = str(record.get("title", "") if record else game_id)
+        titles = {
+            "install": tr("Instaluję {name}", name=name),
+            "update": tr("Aktualizuję {name}", name=name),
+            "verify": tr("Weryfikuję {name}", name=name),
+            "uninstall": tr("Odinstalowuję {name}", name=name),
+        }
+        dialog = store_ui.StoreProgressDialog(
+            titles.get(action, adapter.label), self
+        )
+        max_workers = self.db.get_int(f"{store}_max_workers", 0)
+        worker = stores.StoreJobWorker(
+            adapter,
+            action,
+            str(binary),
+            game_id,
+            target_path=target_path,
+            install_path=install_path,
+            max_workers=max_workers,
+            parent=self,
+        )
+        self._store_job_workers[store] = worker
+        self._store_job_dialogs[store] = dialog
+        self.stores_page.set_sync_busy(store, True)
+        worker.output.connect(dialog.append_log)
+        worker.progress.connect(dialog.set_progress)
+        worker.result.connect(
+            lambda payload: self._store_job_result(store, payload)
+        )
+        worker.finished.connect(worker.deleteLater)
+        dialog.cancelled.connect(worker.cancel)
+        worker.start()
+        dialog.show()
+
+    def _store_job_result(self, store: str, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        self._store_job_workers.pop(store, None)
+        dialog = self._store_job_dialogs.pop(store, None)
+        self.stores_page.set_sync_busy(store, False)
+        action = str(data.get("action", "") or "")
+        game_id = str(data.get("game_id", "") or "")
+        ok = bool(data.get("ok"))
+        cancelled = bool(data.get("cancelled"))
+        if dialog is not None:
+            dialog.set_running(False)
+        if not ok:
+            message = (
+                tr("Anulowano.")
+                if cancelled
+                else str(data.get("error", tr("Operacja sklepu nie powiodła się.")))
+            )
+            if dialog is not None:
+                dialog.set_status(message)
+                dialog.append_log(message)
+            self.toast(message.splitlines()[0])
+            return
+        metadata = data.get("metadata") or {}
+        if action in {"install", "update"}:
+            path = str(
+                metadata.get("path")
+                or data.get("install_path")
+                or data.get("target_path")
+                or ""
+            )
+            try:
+                size = int(
+                    metadata.get("size", 0)
+                    or metadata.get("install_size", 0)
+                    or 0
+                )
+            except (TypeError, ValueError):
+                size = 0
+            self.db.update_store_install(
+                store,
+                game_id,
+                installed=True,
+                install_path=path,
+                version=str(metadata.get("version", "") or ""),
+                size=max(0, size),
+            )
+            target_path = str(data.get("target_path", "") or "")
+            if (
+                action == "install"
+                and path
+                and target_path
+                and Path(path) != Path(target_path)
+            ):
+                self.toast(
+                    tr("Gra została zainstalowana w {path}.", path=path)
+                )
+            if action == "install":
+                if dialog is not None:
+                    dialog.accept()
+                self._store_spec_request(
+                    store, game_id, "library", install_path=path
+                )
+            else:
+                record = self.db.get_store_library_game(store, game_id)
+                if record is not None:
+                    self._store_upsert_row(store, record)
+                if dialog is not None:
+                    dialog.accept()
+            self.toast(
+                tr(
+                    "Zakończono {action} dla {name}.",
+                    action=tr("instalację") if action == "install" else tr("aktualizację"),
+                    name=str((self.db.get_store_library_game(store, game_id) or {}).get("title", game_id)),
+                )
+            )
+        elif action == "verify":
+            if dialog is not None:
+                dialog.accept()
+            self.toast(tr("Weryfikacja plików zakończona."))
+        elif action == "uninstall":
+            self.db.update_store_install(store, game_id, installed=False)
+            existing = self.db.find_store_game(store, game_id)
+            if existing is not None:
+                self.db.delete_game(int(existing["id"]))
+            if dialog is not None:
+                dialog.accept()
+            self.toast(tr("Gra została odinstalowana."))
+        self.stores_page.reload()
+        self.library_page.reload()
+        panel = self.settings_page.store_settings_panels.get(store)
+        if panel is not None:
+            panel.refresh_status()
+        self._refresh_tray_menu()
+        if self.console is not None:
+            self.console.reload()
+
+    def _store_spec_request(
+        self,
+        store: str,
+        game_id: str,
+        purpose: str,
+        *,
+        install_path: str = "",
+        game: dict[str, Any] | None = None,
+    ) -> None:
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return
+        if store in self._store_spec_workers:
+            self.toast(tr("Przygotowanie uruchomienia już trwa."))
+            return
+        binary = self._store_binary(store)
+        if binary is None:
+            return
+        worker = stores.StoreSpecWorker(
+            adapter, str(binary), game_id, install_path, self
+        )
+        self._store_spec_workers[store] = worker
+        self._store_spec_purposes[store] = purpose
+        self._store_spec_games[store] = game or {}
+        worker.result.connect(
+            lambda payload: self._store_spec_result(store, payload)
+        )
+        worker.finished.connect(
+            lambda: self._store_spec_finished(store)
+        )
+        worker.start()
+
+    def _store_spec_result(self, store: str, payload: object) -> None:
+        adapter = self._store_adapter(store)
+        data = payload if isinstance(payload, dict) else {}
+        purpose = self._store_spec_purposes.get(store, "")
+        game = self._store_spec_games.get(store) or {}
+        if not data.get("ok"):
+            if purpose == "launch" and game:
+                record = self.db.get_store_library_game(
+                    store, str(game.get("store_id", ""))
+                )
+                cached = str((record or {}).get("spec_json", "") or "")
+                if cached:
+                    try:
+                        cached_spec = json.loads(cached)
+                    except (TypeError, ValueError):
+                        cached_spec = None
+                    if isinstance(cached_spec, dict) and cached_spec.get("command"):
+                        self.toast(
+                            tr("Używam zapisanej konfiguracji uruchamiania.")
+                        )
+                        self._start_store_process(store, game, cached_spec)
+                        return
+            error_text = str(data.get("error", "") or "")
+            if (
+                store == "gog"
+                and "goggame" in error_text.lower()
+                and purpose in {"launch", "launch-add", "library"}
+            ):
+                game_id = str(
+                    data.get("game_id", "")
+                    or game.get("store_id", "")
+                    or ""
+                )
+                if game_id and game_id not in self._gog_locate_prompted:
+                    self._gog_locate_prompted.add(game_id)
+                    if self._locate_store_game(
+                        store, game_id, retry=True, purpose=purpose
+                    ):
+                        return
+            QMessageBox.warning(
+                self,
+                adapter.label if adapter else store,
+                str(data.get("error", tr("Nie można przygotować uruchomienia gry."))),
+            )
+            self.status_label.setText(tr("GOTOWY"))
+            return
+        spec = data.get("spec") or {}
+        game_id = str(
+            data.get("game_id", "") or game.get("store_id", "") or ""
+        )
+        actual_install_path = str(spec.get("install_path", "") or "")
+        if game_id and actual_install_path:
+            record = self.db.get_store_library_game(store, game_id)
+            if record is not None and str(record.get("install_path", "")) != actual_install_path:
+                self.db.update_store_install(
+                    store,
+                    game_id,
+                    installed=True,
+                    install_path=actual_install_path,
+                    version=str(record.get("version", "") or ""),
+                    size=int(record.get("size", 0) or 0),
+                )
+        if purpose in {"library", "launch-add"}:
+            record = self.db.get_store_library_game(store, game_id)
+            if record is not None:
+                item = dict(record)
+                item["spec_json"] = json.dumps(spec)
+                self._store_upsert_row(store, item)
+                self.db.set_store_spec(store, game_id, json.dumps(spec))
+            self.library_page.reload()
+            self._refresh_tray_menu()
+            if purpose == "launch-add" and game_id:
+                game = self.db.find_store_game(store, game_id)
+                if game is not None:
+                    self._start_store_process(store, game, spec)
+            return
+        if purpose == "launch" and game:
+            record = self.db.get_store_library_game(store, game_id)
+            if record is not None:
+                item = dict(record)
+                item["spec_json"] = json.dumps(spec)
+                self._store_upsert_row(store, item)
+            self._start_store_process(store, game, spec)
+
+    def _store_spec_finished(self, store: str) -> None:
+        worker = self._store_spec_workers.pop(store, None)
+        self._store_spec_purposes.pop(store, None)
+        self._store_spec_games.pop(store, None)
+        if worker is not None:
+            worker.deleteLater()
+
+    def launch_store_game(self, store: str, game_id: str) -> None:
+        if self._active_process is not None:
+            self.toast(
+                tr("Gra już działa. Zakończ bieżący proces przed startem kolejnej.")
+            )
+            return
+        record = self.db.get_store_library_game(store, game_id)
+        if record is None:
+            self.toast(tr("Nie znaleziono gry w bibliotece sklepu."))
+            return
+        if not record.get("installed"):
+            self.toast(tr("Najpierw zainstaluj grę."))
+            return
+        if self._warn_third_party(record, str(record.get("store", "")).upper()):
+            return
+        game = self.db.find_store_game(store, game_id)
+        if game is None:
+            self._store_spec_request(
+                store,
+                game_id,
+                "launch-add",
+                install_path=str(record.get("install_path", "") or ""),
+            )
+            return
+        self.start_store_game(store, game)
+
+    def start_store_game(self, store: str, game: dict[str, Any]) -> None:
+        game_id = str(game.get("store_id", "") or "")
+        if not game_id:
+            return
+        if self.console is not None and self.console.isVisible():
+            self.console.hide()
+        record = self.db.get_store_library_game(store, game_id)
+        if record is not None and self._warn_third_party(
+            record, str(record.get("store", "")).upper()
+        ):
+            return
+        install_path = str(record.get("install_path", "") if record else "")
+        self.status_label.setText(
+            tr("Przygotowuję uruchomienie {name}...", name=game.get("name", ""))
+        )
+        self._store_spec_request(
+            store, game_id, "launch", install_path=install_path, game=game
+        )
+
+    def _start_store_process(
+        self, store: str, game: dict[str, Any], spec: dict[str, Any]
+    ) -> None:
+        if self._active_process is not None:
+            self.toast(
+                tr("Gra już działa. Zakończ bieżący proces przed startem kolejnej.")
+            )
+            return
+        if not str(game.get("wine_prefix", "")).strip():
+            prefix = db.make_prefix(str(game.get("name", "game")))
+            self.db.update_game(int(game["id"]), wine_prefix=prefix)
+            game = dict(game, wine_prefix=prefix)
+        try:
+            command = [str(spec.get("command", ""))] + [
+                str(item) for item in spec.get("arguments") or []
+            ]
+            runtime = write_runtime_file(
+                self.db,
+                game,
+                command=command,
+                extra_env=spec.get("env") or {},
+                working_dir=str(spec.get("cwd", "") or "") or None,
+            )
+        except Exception as exc:
+            log.error("Cannot prepare store launch: %s", exc)
+            QMessageBox.warning(self, tr("Nie można uruchomić"), str(exc))
+            self.status_label.setText(tr("GOTOWY"))
+            return
+        workdir = Path(str(spec.get("cwd", "") or "")).expanduser()
+        self._launch_runtime_process(
+            game, runtime, workdir if workdir.is_dir() else None
+        )
+
+    def open_store_folder(self, store: str, game_id: str) -> None:
+        record = self.db.get_store_library_game(store, game_id)
+        if record is None:
+            return
+        path = Path(str(record.get("install_path", "") or "")).expanduser()
+        if not path.is_dir():
+            self.toast(tr("Katalog gry nie istnieje."))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _locate_store_game(
+        self,
+        store: str,
+        game_id: str,
+        retry: bool = False,
+        purpose: str = "launch",
+    ) -> bool:
+        if store != "gog":
+            return False
+        adapter = self._store_adapter(store)
+        if adapter is None:
+            return False
+        record = self.db.get_store_library_game(store, game_id)
+        initial = (
+            str(record.get("install_path", "") or "")
+            if record is not None
+            else str(Path.home() / "Games")
+        )
+        folder = QFileDialog.getExistingDirectory(
+            self, tr("Wskaż folder gry GOG"), initial or str(Path.home())
+        )
+        if not folder:
+            return False
+        found = adapter.find_game_dir(folder, game_id)
+        if found is None:
+            QMessageBox.warning(
+                self,
+                "GOG",
+                tr(
+                    "Nie znaleziono pliku goggame-*.info w wybranym katalogu."
+                ),
+            )
+            return False
+        binary = adapter.tool_binary(self.db)
+        meta = adapter.installed_metadata(
+            game_id, str(found), binary=binary
+        )
+        self.db.update_store_install(
+            store,
+            game_id,
+            installed=True,
+            install_path=str(found),
+            version=str(meta.get("version", "") or ""),
+            size=int(
+                (record or {}).get("size", 0)
+                or meta.get("size", 0)
+                or 0
+            ),
+        )
+        page = self.stores_page.pages.get(store)
+        if page is not None:
+            page.reload()
+        if retry:
+            game = self.db.find_store_game(store, game_id)
+            self._store_spec_request(
+                store,
+                game_id,
+                purpose,
+                install_path=str(found),
+                game=game,
+            )
+        else:
+            self._store_spec_request(
+                store, game_id, "library", install_path=str(found)
+            )
+            self.toast(tr("Zapisano folder gry GOG."))
+        return True
+
+    def _open_store_settings(self, store: str) -> None:
+        self._open_settings_page()
+        self.settings_page.focus_store_settings(store)
+
+    # ------------------------------------------------------------------ Amazon
+    def _amazon_binary(self, prompt: bool = True) -> Path | None:
+        try:
+            return amazon.require_nile(self.db)
+        except amazon.NileError as exc:
+            if prompt:
+                answer = QMessageBox.question(
+                    self,
+                    tr("Amazon Games"),
+                    tr("{error}\n\nPobrać nile teraz?", error=exc),
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                )
+                if answer == QMessageBox.StandardButton.Yes:
+                    self.setup_amazon()
+            return None
+
+    def _amazon_install_dir(self) -> Path:
+        raw = self.db.get_setting("amazon_install_dir", "").strip()
+        path = Path(raw).expanduser() if raw else Path.home() / "Games" / "nile"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _amazon_max_workers(self) -> int:
+        return max(0, self.db.get_int("amazon_max_workers", 0))
+
+    def _amazon_busy(self) -> bool:
+        for worker in (
+            self._amazon_setup_worker,
+            self._amazon_sync_worker,
+            self._amazon_job_worker,
+        ):
+            if worker is not None and worker.isRunning():
+                return True
+        return False
+
+    def setup_amazon(self) -> None:
+        if self._amazon_setup_worker is not None:
+            self.toast(tr("Pobieranie nile już trwa."))
+            return
+        self.settings_page.set_busy(True)
+        self.status_label.setText(tr("Pobieram nile..."))
+        worker = amazon.NileSetupWorker(self)
+        self._amazon_setup_worker = worker
+        worker.status.connect(self.status_label.setText)
+        worker.result.connect(self._amazon_setup_result)
+        worker.finished.connect(self._amazon_setup_finished)
+        worker.start()
+
+    def _amazon_setup_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                tr("Amazon Games"),
+                str(data.get("error", tr("Nie udało się pobrać nile."))),
+            )
+            return
+        self.settings_page._refresh_amazon_status()
+        self.toast(
+            tr("nile gotowy: {version}", version=data.get("version") or "?")
+        )
+        self.status_label.setText(tr("nile gotowy."))
+
+    def _amazon_setup_finished(self) -> None:
+        self.settings_page.set_busy(False)
+        worker = self._amazon_setup_worker
+        self._amazon_setup_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def login_amazon(self) -> None:
+        if self._amazon_busy():
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        binary = self._amazon_binary()
+        if binary is None:
+            return
+        user = amazon.current_user()
+        if user.get("name"):
+            QMessageBox.information(
+                self,
+                tr("Amazon Games"),
+                tr("Jesteś już zalogowany jako {name}.", name=user["name"]),
+            )
+            return
+        dialog = AmazonLoginDialog(self.db, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dialog.user.get("name", "")
+        self.amazon_page.set_account(name, True)
+        self.settings_page._refresh_amazon_status()
+        self.toast(tr("Zalogowano do Amazon Games: {name}", name=name or "?"))
+        self.sync_amazon()
+
+    def logout_amazon(self) -> None:
+        if self._amazon_logout_worker is not None:
+            self.toast(tr("Wylogowanie już trwa."))
+            return
+        if self._amazon_busy():
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        binary = self._amazon_binary()
+        if binary is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Amazon Games"),
+            tr(
+                "Wylogować z Amazon Games?\n\n"
+                "Wpisy Amazon zostaną usunięte z biblioteki, ale pliki "
+                "zainstalowanych gier pozostaną na dysku."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.status_label.setText(tr("Wylogowuję z Amazon..."))
+        worker = amazon.NileLogoutWorker(str(binary), self)
+        self._amazon_logout_worker = worker
+        worker.result.connect(self._amazon_logout_result)
+        worker.finished.connect(self._amazon_logout_finished)
+        worker.start()
+
+    def _amazon_logout_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                tr("Amazon Games"),
+                str(data.get("error", tr("Wylogowanie nie powiodło się."))),
+            )
+            return
+        self.db.clear_amazon_library()
+        self.db.delete_amazon_games()
+        self.db.set_setting("amazon_library_synced", "")
+        self.amazon_page.set_account("", False)
+        self.amazon_page.set_updates([])
+        self.library_page.reload()
+        self.settings_page._refresh_amazon_status()
+        self._refresh_tray_menu()
+        self.toast(tr("Wylogowano z Amazon Games."))
+
+    def _amazon_logout_finished(self) -> None:
+        worker = self._amazon_logout_worker
+        self._amazon_logout_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.status_label.setText(tr("GOTOWY"))
+
+    def sync_amazon(self) -> None:
+        if self._amazon_sync_worker is not None:
+            self.toast(tr("Synchronizacja Amazon już trwa."))
+            return
+        if self._amazon_busy():
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        binary = self._amazon_binary()
+        if binary is None:
+            return
+        self.amazon_page.set_sync_busy(True)
+        self.settings_page.set_busy(True)
+        self.status_label.setText(tr("Synchronizuję bibliotekę Amazon..."))
+        worker = amazon.NileSyncWorker(str(binary), True, self)
+        self._amazon_sync_worker = worker
+        worker.status.connect(self.status_label.setText)
+        worker.result.connect(self._amazon_sync_result)
+        worker.finished.connect(self._amazon_sync_finished)
+        worker.start()
+
+    def _amazon_sync_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        if not data.get("ok"):
+            QMessageBox.warning(
+                self,
+                tr("Amazon Games"),
+                str(
+                    data.get(
+                        "error", tr("Nieznany błąd synchronizacji Amazon.")
+                    )
+                ),
+            )
+            return
+        games = [
+            item for item in (data.get("games") or []) if isinstance(item, dict)
+        ]
+        synced = time.strftime("%Y-%m-%d %H:%M")
+        self.db.replace_amazon_library(games, synced)
+        self.db.set_setting("amazon_library_synced", synced)
+        installed_ids = {
+            str(item.get("product_id", ""))
+            for item in games
+            if item.get("installed")
+        }
+        for item in games:
+            if item.get("installed"):
+                self._upsert_amazon_library_row(item)
+        removed = 0
+        for existing in self.db.list_games():
+            if not int(existing.get("is_amazon", 0) or 0):
+                continue
+            product_id = str(existing.get("amazon_id", "") or "")
+            if product_id and product_id not in installed_ids:
+                self.db.delete_game(int(existing["id"]))
+                removed += 1
+        username = str(data.get("username", "") or "")
+        self.amazon_page.set_account(username, True)
+        self.amazon_page.set_updates(data.get("updates") or [])
+        self.amazon_page.reload()
+        self.library_page.reload()
+        self.settings_page._refresh_amazon_status()
+        self._refresh_tray_menu()
+        if self.console is not None:
+            self.console.reload()
+        self.toast(
+            tr(
+                "Amazon: {count} gier w bibliotece, {installed} zainstalowanych.",
+                count=len(games),
+                installed=len(installed_ids),
+            )
+        )
+        if removed:
+            self.toast(
+                tr(
+                    "Usunięto {count} nieaktualnych wpisów Amazon z biblioteki.",
+                    count=removed,
+                )
+            )
+
+    def _amazon_sync_finished(self) -> None:
+        worker = self._amazon_sync_worker
+        self._amazon_sync_worker = None
+        self.amazon_page.set_sync_busy(False)
+        self.settings_page.set_busy(False)
+        self.status_label.setText(tr("GOTOWY"))
+        if worker is not None:
+            worker.deleteLater()
+
+    def _upsert_amazon_library_row(self, item: dict[str, Any]) -> None:
+        product_id = str(item.get("product_id", "") or "").strip()
+        if not product_id:
+            return
+        record = self.db.get_amazon_library_game(product_id) or item
+        spec = item.get("spec") or {}
+        existing = self.db.find_amazon_game(product_id)
+        exe = str(
+            spec.get("command")
+            or (existing or {}).get("exe_path")
+            or ""
+        )
+        if not exe:
+            return
+        cover = str(
+            record.get("cover_path")
+            or (existing or {}).get("cover_path")
+            or ""
+        )
+        values: dict[str, Any] = {
+            "name": str(
+                record.get("title") or item.get("title") or product_id
+            ),
+            "exe_path": exe,
+            "is_amazon": 1,
+            "amazon_id": product_id,
+            "cover_path": cover,
+        }
+        if existing is None:
+            values.update(
+                {
+                    "runner_path": "",
+                    "wine_prefix": "",
+                    "env_vars": "",
+                    "launch_args": "",
+                    "scaling_mode": "native",
+                    "fps_limit": 0,
+                    "winetricks_verbs": "",
+                    "winetricks_auto": 0,
+                    "winetricks_state": "",
+                }
+            )
+        self.db.upsert_amazon_game(**values)
+        if spec:
+            try:
+                self.db.set_amazon_spec(product_id, json.dumps(spec))
+            except (TypeError, ValueError):
+                pass
+
+    def _amazon_cover_updated(self, product_id: str, path: str) -> None:
+        game = self.db.find_amazon_game(product_id)
+        if game is None:
+            return
+        self.db.update_game(int(game["id"]), cover_path=path)
+        self.library_page.reload()
+        self._refresh_tray_menu()
+
+    def _amazon_apply_metadata(
+        self, product_id: str, metadata: dict[str, Any]
+    ) -> None:
+        if not metadata:
+            return
+        try:
+            size = int(metadata.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            size = 0
+        self.db.update_amazon_install(
+            product_id,
+            installed=True,
+            install_path=str(metadata.get("path", "") or ""),
+            version=str(metadata.get("version", "") or ""),
+            size=max(0, size),
+        )
+
+    def install_amazon_game(self, product_id: str) -> None:
+        if self._amazon_job_worker is not None:
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        binary = self._amazon_binary()
+        if binary is None:
+            return
+        record = self.db.get_amazon_library_game(product_id)
+        if record is None:
+            self.toast(tr("Nie znaleziono gry w bibliotece Amazon."))
+            return
+        if record.get("installed"):
+            self.toast(tr("Ta gra jest już zainstalowana."))
+            return
+        self._start_amazon_job(
+            "install", product_id, base_path=str(self._amazon_install_dir())
+        )
+
+    def update_amazon_game(self, product_id: str) -> None:
+        record = self.db.get_amazon_library_game(product_id)
+        if record is None or not record.get("installed"):
+            self.toast(tr("Najpierw zainstaluj grę Amazon."))
+            return
+        self._start_amazon_job("update", product_id)
+
+    def verify_amazon_game(self, product_id: str) -> None:
+        record = self.db.get_amazon_library_game(product_id)
+        if record is None or not record.get("installed"):
+            self.toast(tr("Najpierw zainstaluj grę Amazon."))
+            return
+        install_path = str(record.get("install_path", "") or "").strip()
+        if not install_path:
+            self.toast(tr("Nieznana ścieżka instalacji gry Amazon."))
+            return
+        self._start_amazon_job(
+            "verify", product_id, install_path=install_path
+        )
+
+    def uninstall_amazon_game(self, product_id: str) -> None:
+        record = self.db.get_amazon_library_game(product_id)
+        if record is None:
+            self.toast(tr("Nie znaleziono gry w bibliotece Amazon."))
+            return
+        answer = QMessageBox.question(
+            self,
+            tr("Odinstaluj grę Amazon"),
+            tr(
+                "Odinstalować „{name}”?\n\nPliki gry zostaną usunięte, a wpis "
+                "zniknie z biblioteki. WINEPREFIX pozostanie na dysku.",
+                name=record.get("title", product_id),
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_amazon_job("uninstall", product_id)
+
+    def _start_amazon_job(
+        self,
+        action: str,
+        product_id: str,
+        *,
+        base_path: str = "",
+        install_path: str = "",
+    ) -> None:
+        if self._amazon_job_worker is not None:
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        if self._amazon_sync_worker is not None or self._amazon_setup_worker is not None:
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        binary = self._amazon_binary()
+        if binary is None:
+            return
+        record = self.db.get_amazon_library_game(product_id)
+        name = str(record.get("title", "") if record else product_id)
+        titles = {
+            "install": tr("Instaluję {name}", name=name),
+            "update": tr("Aktualizuję {name}", name=name),
+            "verify": tr("Weryfikuję {name}", name=name),
+            "uninstall": tr("Odinstalowuję {name}", name=name),
+        }
+        dialog = AmazonProgressDialog(
+            titles.get(action, tr("Amazon Games")), self
+        )
+        worker = amazon.NileJobWorker(
+            str(binary),
+            action,
+            product_id,
+            base_path=base_path,
+            install_path=install_path,
+            max_workers=self._amazon_max_workers(),
+            parent=self,
+        )
+        self._amazon_job_worker = worker
+        self._amazon_job_dialog = dialog
+        self.amazon_page.set_sync_busy(True)
+        worker.output.connect(dialog.append_log)
+        worker.progress.connect(dialog.set_progress)
+        worker.result.connect(self._amazon_job_result)
+        worker.finished.connect(worker.deleteLater)
+        dialog.cancelled.connect(worker.cancel)
+        worker.start()
+        dialog.show()
+
+    def _amazon_job_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        self._amazon_job_worker = None
+        dialog = self._amazon_job_dialog
+        self._amazon_job_dialog = None
+        self.amazon_page.set_sync_busy(False)
+        action = str(data.get("action", "") or "")
+        product_id = str(data.get("product_id", "") or "")
+        ok = bool(data.get("ok"))
+        cancelled = bool(data.get("cancelled"))
+        if dialog is not None:
+            dialog.set_running(False)
+        if not ok:
+            message = (
+                tr("Anulowano.")
+                if cancelled
+                else str(
+                    data.get("error", tr("Operacja Amazon nie powiodła się."))
+                )
+            )
+            if dialog is not None:
+                dialog.set_status(message)
+                dialog.append_log(message)
+            self.toast(message.splitlines()[0])
+            return
+        metadata = data.get("metadata") or {}
+        if action == "install" and not metadata:
+            message = tr(
+                "nile nie potwierdził instalacji gry. Sprawdź log poniżej."
+            )
+            if dialog is not None:
+                dialog.set_status(message)
+                dialog.append_log(message)
+            self.toast(message)
+            return
+        if action in {"install", "update"}:
+            self._amazon_apply_metadata(product_id, metadata)
+            record = self.db.get_amazon_library_game(product_id)
+            if action == "install":
+                if dialog is not None:
+                    dialog.accept()
+                self._request_amazon_spec(
+                    product_id,
+                    "library",
+                    install_path=str(
+                        metadata.get("path")
+                        or (record or {}).get("install_path")
+                        or ""
+                    ),
+                )
+            else:
+                if record is not None:
+                    self._upsert_amazon_library_row(record)
+                if dialog is not None:
+                    dialog.accept()
+            self.toast(
+                tr(
+                    "Amazon: {action} zakończone dla {name}.",
+                    action=tr("instalacja")
+                    if action == "install"
+                    else tr("aktualizacja"),
+                    name=str((record or {}).get("title", product_id)),
+                )
+            )
+        elif action == "verify":
+            if dialog is not None:
+                dialog.accept()
+            self.toast(tr("Weryfikacja plików gry Amazon zakończona."))
+        elif action == "uninstall":
+            self.db.update_amazon_install(product_id, installed=False)
+            existing = self.db.find_amazon_game(product_id)
+            if existing is not None:
+                self.db.delete_game(int(existing["id"]))
+            if dialog is not None:
+                dialog.accept()
+            self.toast(tr("Gra Amazon została odinstalowana."))
+        self.amazon_page.reload()
+        self.library_page.reload()
+        self.settings_page._refresh_amazon_status()
+        self._refresh_tray_menu()
+        if self.console is not None:
+            self.console.reload()
+
+    def _request_amazon_spec(
+        self,
+        product_id: str,
+        purpose: str,
+        *,
+        install_path: str = "",
+        game: dict[str, Any] | None = None,
+    ) -> None:
+        if self._amazon_spec_worker is not None:
+            self.toast(tr("Przygotowanie uruchomienia Amazon już trwa."))
+            return
+        if self._amazon_job_worker is not None:
+            self.toast(tr("Operacja Amazon już trwa."))
+            return
+        binary = self._amazon_binary()
+        if binary is None:
+            return
+        worker = amazon.NileSpecWorker(
+            str(binary), product_id, install_path, self
+        )
+        self._amazon_spec_worker = worker
+        self._amazon_spec_purpose = purpose
+        self._amazon_spec_product = product_id
+        self._amazon_pending_game = game
+        worker.result.connect(self._amazon_spec_result)
+        worker.finished.connect(self._amazon_spec_finished)
+        worker.start()
+
+    def _amazon_spec_result(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        purpose = self._amazon_spec_purpose
+        product_id = self._amazon_spec_product
+        game = self._amazon_pending_game
+        self._amazon_pending_game = None
+        if not data.get("ok"):
+            if purpose == "launch" and game is not None:
+                record = self.db.get_amazon_library_game(product_id)
+                cached = str((record or {}).get("spec_json", "") or "")
+                if cached:
+                    try:
+                        cached_spec = json.loads(cached)
+                    except (TypeError, ValueError):
+                        cached_spec = None
+                    if isinstance(cached_spec, dict) and cached_spec.get("command"):
+                        self.toast(
+                            tr(
+                                "Używam zapisanej konfiguracji uruchamiania Amazon."
+                            )
+                        )
+                        self._start_amazon_process(game, cached_spec)
+                        return
+            QMessageBox.warning(
+                self,
+                tr("Amazon Games"),
+                str(
+                    data.get(
+                        "error", tr("Nie można przygotować uruchomienia gry.")
+                    )
+                ),
+            )
+            self.status_label.setText(tr("GOTOWY"))
+            return
+        spec = data.get("spec") or {}
+        if spec:
+            try:
+                self.db.set_amazon_spec(product_id, json.dumps(spec))
+            except (TypeError, ValueError):
+                pass
+        if purpose in {"library", "launch-add"}:
+            record = self.db.get_amazon_library_game(product_id)
+            if record is not None:
+                item = dict(record)
+                item["spec"] = spec
+                self._upsert_amazon_library_row(item)
+            self.library_page.reload()
+            self._refresh_tray_menu()
+            if purpose == "launch-add":
+                game = self.db.find_amazon_game(product_id)
+                if game is not None:
+                    self._start_amazon_process(game, spec)
+            return
+        if purpose == "launch" and game is not None:
+            self._start_amazon_process(game, spec)
+
+    def _amazon_spec_finished(self) -> None:
+        worker = self._amazon_spec_worker
+        self._amazon_spec_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def launch_amazon_game(self, product_id: str) -> None:
+        if self._active_process is not None:
+            self.toast(
+                tr("Gra już działa. Zakończ bieżący proces przed startem kolejnej.")
+            )
+            return
+        record = self.db.get_amazon_library_game(product_id)
+        if record is None:
+            self.toast(tr("Nie znaleziono gry w bibliotece Amazon."))
+            return
+        if not record.get("installed"):
+            self.toast(tr("Najpierw zainstaluj grę Amazon."))
+            return
+        game = self.db.find_amazon_game(product_id)
+        if game is None:
+            self._request_amazon_spec(
+                product_id,
+                "launch-add",
+                install_path=str(record.get("install_path", "") or ""),
+            )
+            return
+        self.start_amazon_game(game)
+
+    def start_amazon_game(self, game: dict[str, Any]) -> None:
+        product_id = str(game.get("amazon_id", "") or "")
+        if not product_id:
+            return
+        if self.console is not None and self.console.isVisible():
+            self.console.hide()
+        record = self.db.get_amazon_library_game(product_id)
+        install_path = str(record.get("install_path", "") if record else "")
+        self.status_label.setText(
+            tr("AMAZON // przygotowuję {name}", name=game.get("name", ""))
+        )
+        self._request_amazon_spec(
+            product_id, "launch", install_path=install_path, game=game
+        )
+
+    def _start_amazon_process(
+        self, game: dict[str, Any], spec: dict[str, Any]
+    ) -> None:
+        if self._active_process is not None:
+            self.toast(
+                tr("Gra już działa. Zakończ bieżący proces przed startem kolejnej.")
+            )
+            return
+        if not str(game.get("wine_prefix", "")).strip():
+            prefix = db.make_prefix(str(game.get("name", "game")))
+            self.db.update_game(int(game["id"]), wine_prefix=prefix)
+            game = dict(game, wine_prefix=prefix)
+        try:
+            command = [str(spec.get("command", ""))] + [
+                str(item) for item in spec.get("arguments") or []
+            ]
+            runtime = write_runtime_file(
+                self.db,
+                game,
+                command=command,
+                extra_env=spec.get("env") or {},
+                working_dir=str(spec.get("cwd", "") or "") or None,
+            )
+        except Exception as exc:
+            log.error("Cannot prepare Amazon launch: %s", exc)
+            QMessageBox.warning(
+                self, tr("Nie można uruchomić"), str(exc)
+            )
+            self.status_label.setText(tr("GOTOWY"))
+            return
+        workdir = Path(str(spec.get("cwd", "") or "")).expanduser()
+        self._launch_runtime_process(
+            game, runtime, workdir if workdir.is_dir() else None
+        )
+
+    def open_amazon_folder(self, product_id: str) -> None:
+        record = self.db.get_amazon_library_game(product_id)
+        if record is None:
+            return
+        path = Path(str(record.get("install_path", "") or "")).expanduser()
+        if not path.is_dir():
+            self.toast(tr("Katalog gry nie istnieje."))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _run_steam_uri(self, uri: str) -> bool:
         try:
@@ -5504,6 +8227,12 @@ class MainWindow(QMainWindow):
         if game.get("is_steam") and game.get("steam_appid"):
             self.start_steam_game(game)
             return
+        store = str(game.get("store", "") or "").strip()
+        if not store and game.get("is_amazon"):
+            store = "amazon"
+        if store in stores.STORES:
+            self.start_store_game(store, game)
+            return
         self._steam_game_name = ""
         try:
             runtime = self._stage_runtime(game)
@@ -5549,11 +8278,22 @@ class MainWindow(QMainWindow):
                 "pominięty. Użyj Proton FSR lub zainstaluj Gamescope.")
             )
 
+        working_dir = Path(str(game.get("exe_path", ""))).expanduser().parent
+        self._launch_runtime_process(
+            game, runtime, working_dir if working_dir.is_dir() else None
+        )
+
+    def _launch_runtime_process(
+        self,
+        game: dict[str, Any],
+        runtime: Path,
+        working_dir: Path | None = None,
+    ) -> None:
+        """Start launcher.sh for an already prepared runtime file."""
         process = QProcess(self)
         process.setProgram("/bin/sh")
         process.setArguments([str(self._launcher), str(runtime)])
-        working_dir = Path(str(game.get("exe_path", ""))).expanduser().parent
-        if working_dir.is_dir():
+        if working_dir is not None and working_dir.is_dir():
             process.setWorkingDirectory(str(working_dir))
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         process.started.connect(partial(self._on_game_started, process, game))
@@ -5563,7 +8303,12 @@ class MainWindow(QMainWindow):
         self._active_game = game
         self.status_label.setText(f"URUCHAMIANIE // {game.get('name', '')}")
         self._update_sidebar_state()
-        log.info("Launching game id=%s name=%s runtime=%s", game_id, game.get("name"), runtime)
+        log.info(
+            "Launching game id=%s name=%s runtime=%s",
+            game.get("id"),
+            game.get("name"),
+            runtime,
+        )
         process.start()
 
     def start_steam_game(self, game: dict[str, Any]) -> None:
@@ -6186,6 +8931,13 @@ class MainWindow(QMainWindow):
                 tr("Trwa operacja na konfiguracji Steam. Poczekaj na jej zakończenie."),
             )
             return
+        if any(worker.isRunning() for worker in self._store_job_workers.values()):
+            QMessageBox.information(
+                self,
+                tr("SKLEPY"),
+                tr("Trwa operacja sklepu. Poczekaj na jej zakończenie."),
+            )
+            return
         if self._active_process is not None:
             answer = QMessageBox.question(
                 self,
@@ -6202,8 +8954,17 @@ class MainWindow(QMainWindow):
         if self._steam_library_worker is not None:
             self._steam_library_worker.wait(40000)
             self._steam_library_worker = None
-        if getattr(self, "steam_page", None) is not None:
-            self.steam_page.shutdown()
+        for workers in (
+            self._store_setup_workers,
+            self._store_sync_workers,
+            self._store_spec_workers,
+            self._store_logout_workers,
+        ):
+            for worker in list(workers.values()):
+                worker.wait(6000)
+        if getattr(self, "stores_page", None) is not None:
+            self._cancel_all_asset_workers()
+            self.stores_page.shutdown()
         self._save_geometry()
         self.close()
         QApplication.quit()
@@ -6224,9 +8985,18 @@ class MainWindow(QMainWindow):
             )
             event.ignore()
             return
+        if any(worker.isRunning() for worker in self._store_job_workers.values()):
+            QMessageBox.information(
+                self,
+                tr("SKLEPY"),
+                tr("Trwa operacja sklepu. Poczekaj na jej zakończenie."),
+            )
+            event.ignore()
+            return
         if self._force_quit:
-            if getattr(self, "steam_page", None) is not None:
-                self.steam_page.shutdown()
+            if getattr(self, "stores_page", None) is not None:
+                self._cancel_all_asset_workers()
+                self.stores_page.shutdown()
             event.accept()
             return
         if self._active_process is not None:

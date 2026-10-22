@@ -30,7 +30,7 @@ if [ -z "$PYTHON" ]; then
         PYTHON=python3
     fi
 fi
-"$PYTHON" -m py_compile main.py core.py db.py
+"$PYTHON" -m py_compile main.py core.py db.py amazon.py stores.py store_ui.py
 "$PYTHON" -m unittest discover -s tests -v
 
 git tag -a "$TAG" -m "Boostlayer $VERSION"

@@ -452,9 +452,15 @@ class ConsoleWindow(QMainWindow):
         for game in self._games:
             item = QListWidgetItem(self._icon_for(game), str(game.get("name", "?")))
             item.setData(Qt.ItemDataRole.UserRole, int(game["id"]))
+            store = str(game.get("store", "") or "").upper()
             item.setData(
                 SOURCE_ROLE,
-                "STEAM" if game.get("is_steam") else "STANDALONE",
+                store
+                or (
+                    "AMAZON"
+                    if game.get("is_amazon")
+                    else ("STEAM" if game.get("is_steam") else "STANDALONE")
+                ),
             )
             item.setToolTip(str(game.get("name", "")))
             item.setSizeHint(QSize(254, 380))
@@ -520,7 +526,15 @@ class ConsoleWindow(QMainWindow):
             from core import exe_bits
 
             bits = exe_bits(str(game.get("exe_path", "")))
-        source = "STEAM" if game.get("is_steam") else tr("STANDALONE")
+        store = str(game.get("store", "") or "").upper()
+        source = (
+            store
+            or (
+                "AMAZON"
+                if game.get("is_amazon")
+                else ("STEAM" if game.get("is_steam") else tr("STANDALONE"))
+            )
+        )
         if bits:
             source += f"  ·  {bits}-BIT"
         runner = Path(str(game.get("runner_path", ""))).name or "AUTO"

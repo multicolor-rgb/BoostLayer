@@ -87,7 +87,7 @@ jobs:
       - name: Verify Python sources
         shell: bash
         run: |
-          python3 -m py_compile main.py core.py db.py theme.py console.py tools/render_icons.py
+          python3 -m py_compile main.py core.py db.py theme.py console.py amazon.py stores.py store_ui.py tools/render_icons.py
           sh -n launcher.sh
           sh -n build.sh
           sh -n release.sh
@@ -102,8 +102,11 @@ jobs:
           app.setStyleSheet(main.QSS)
           database = main.Database()
           window = main.MainWindow(database)
-          assert window.stack.count() == 4
+          assert window.stack.count() == 5
+          assert window.stores_page.tabs.count() == 4
+          assert window.settings_page.store_settings_tabs.count() == 4
           assert database.get_mangohud()["position"]
+          assert database.stats()["amazon"] == 0
           database.close()
           print("UI smoke test OK")
           PY

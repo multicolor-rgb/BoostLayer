@@ -140,6 +140,12 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "steam_id64": "",
     "steam_library_synced": "",
     "auto_steam_wrapper": "1",
+    "amazon_install_dir": str(Path.home() / "Games" / "nile"),
+    "amazon_nile_path": "",
+    "amazon_library_synced": "",
+    "amazon_max_workers": "0",
+    "prefetch_covers": "1",
+    "prefetch_sizes": "1",
     "global_hotkey": "1",
     "theme": "cyber",
     "language": "pl",
@@ -159,6 +165,10 @@ LIBRARY_FIELDS = (
     "fps_limit",
     "is_steam",
     "steam_appid",
+    "is_amazon",
+    "amazon_id",
+    "store",
+    "store_id",
     "cover_path",
     "winetricks_verbs",
     "winetricks_auto",
@@ -351,6 +361,10 @@ class Database:
                     fps_limit    INTEGER NOT NULL DEFAULT 0,
                     is_steam     INTEGER NOT NULL DEFAULT 0,
                     steam_appid  TEXT NOT NULL DEFAULT '',
+                    is_amazon    INTEGER NOT NULL DEFAULT 0,
+                    amazon_id    TEXT NOT NULL DEFAULT '',
+                    store        TEXT NOT NULL DEFAULT '',
+                    store_id     TEXT NOT NULL DEFAULT '',
                     cover_path   TEXT NOT NULL DEFAULT '',
                     winetricks_verbs TEXT NOT NULL DEFAULT '',
                     winetricks_auto  INTEGER NOT NULL DEFAULT 0,
@@ -368,14 +382,61 @@ class Database:
                     playtime_minutes INTEGER NOT NULL DEFAULT 0,
                     installed        INTEGER NOT NULL DEFAULT 0,
                     cover_path       TEXT NOT NULL DEFAULT '',
+                    size             INTEGER NOT NULL DEFAULT 0,
                     last_synced      TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_steam_library_name
                     ON steam_library(name COLLATE NOCASE);
+
+                CREATE TABLE IF NOT EXISTS amazon_library (
+                    product_id     TEXT PRIMARY KEY,
+                    entitlement_id TEXT NOT NULL DEFAULT '',
+                    title          TEXT NOT NULL,
+                    description    TEXT NOT NULL DEFAULT '',
+                    developer      TEXT NOT NULL DEFAULT '',
+                    icon_url       TEXT NOT NULL DEFAULT '',
+                    cover_url      TEXT NOT NULL DEFAULT '',
+                    cover_path     TEXT NOT NULL DEFAULT '',
+                    installed      INTEGER NOT NULL DEFAULT 0,
+                    install_path   TEXT NOT NULL DEFAULT '',
+                    version        TEXT NOT NULL DEFAULT '',
+                    size           INTEGER NOT NULL DEFAULT 0,
+                    spec_json      TEXT NOT NULL DEFAULT '',
+                    last_synced    TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_amazon_library_title
+                    ON amazon_library(title COLLATE NOCASE);
+
+                CREATE TABLE IF NOT EXISTS store_library (
+                    store         TEXT NOT NULL,
+                    store_id      TEXT NOT NULL,
+                    title         TEXT NOT NULL,
+                    description   TEXT NOT NULL DEFAULT '',
+                    developer     TEXT NOT NULL DEFAULT '',
+                    icon_url      TEXT NOT NULL DEFAULT '',
+                    cover_url     TEXT NOT NULL DEFAULT '',
+                    cover_path    TEXT NOT NULL DEFAULT '',
+                    installed     INTEGER NOT NULL DEFAULT 0,
+                    install_path  TEXT NOT NULL DEFAULT '',
+                    version       TEXT NOT NULL DEFAULT '',
+                    size          INTEGER NOT NULL DEFAULT 0,
+                    spec_json     TEXT NOT NULL DEFAULT '',
+                    extra_json    TEXT NOT NULL DEFAULT '',
+                    last_synced   TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (store, store_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_store_library_title
+                    ON store_library(store, title COLLATE NOCASE);
                 """
             )
             self._migrate_schema()
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_library_amazon "
+                "ON library(amazon_id)"
+            )
             for key, value in DEFAULT_SETTINGS.items():
                 self._conn.execute(
                     "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
@@ -392,12 +453,96 @@ class Database:
             "winetricks_verbs": "TEXT NOT NULL DEFAULT ''",
             "winetricks_auto": "INTEGER NOT NULL DEFAULT 0",
             "winetricks_state": "TEXT NOT NULL DEFAULT ''",
+            "is_amazon": "INTEGER NOT NULL DEFAULT 0",
+            "amazon_id": "TEXT NOT NULL DEFAULT ''",
+            "store": "TEXT NOT NULL DEFAULT ''",
+            "store_id": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in additions.items():
             if name not in columns:
                 self._conn.execute(
                     f"ALTER TABLE library ADD COLUMN {name} {definition}"
                 )
+        amazon_columns = {
+            str(row["name"])
+            for row in self._conn.execute(
+                "PRAGMA table_info(amazon_library)"
+            ).fetchall()
+        }
+        if "spec_json" not in amazon_columns:
+            self._conn.execute(
+                "ALTER TABLE amazon_library ADD COLUMN spec_json "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        steam_columns = {
+            str(row["name"])
+            for row in self._conn.execute(
+                "PRAGMA table_info(steam_library)"
+            ).fetchall()
+        }
+        if "size" not in steam_columns:
+            self._conn.execute(
+                "ALTER TABLE steam_library ADD COLUMN size "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        # Backfill the generic store columns from the legacy ones.  The old
+        # columns/tables stay in place as a safety net for existing databases.
+        self._conn.execute(
+            "UPDATE library SET store = 'steam', store_id = steam_appid "
+            "WHERE (store IS NULL OR store = '') AND is_steam = 1 "
+            "AND steam_appid <> ''"
+        )
+        self._conn.execute(
+            "UPDATE library SET store = 'amazon', store_id = amazon_id "
+            "WHERE (store IS NULL OR store = '') AND is_amazon = 1 "
+            "AND amazon_id <> ''"
+        )
+        for legacy_store, table in (("steam", "steam_library"), ("amazon", "amazon_library")):
+            try:
+                count = int(
+                    self._conn.execute(
+                        f"SELECT COUNT(*) FROM store_library WHERE store = ?",
+                        (legacy_store,),
+                    ).fetchone()[0]
+                )
+            except sqlite3.Error:
+                continue
+            if count:
+                continue
+            try:
+                rows = self._conn.execute(f"SELECT * FROM {table}").fetchall()
+            except sqlite3.Error:
+                continue
+            for row in rows:
+                data = dict(row)
+                store_id = str(
+                    data.get("appid") if legacy_store == "steam" else data.get("product_id")
+                )
+                if not store_id:
+                    continue
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO store_library(store, store_id, title, "
+                    "description, developer, icon_url, cover_url, cover_path, "
+                    "installed, install_path, version, size, last_synced) "
+                    "VALUES(?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?)",
+                    (
+                        legacy_store,
+                        store_id,
+                        str(data.get("name") or data.get("title") or store_id),
+                        str(data.get("cover_path") or ""),
+                        1 if data.get("installed") else 0,
+                        str(data.get("install_path") or ""),
+                        str(data.get("version") or ""),
+                        int(data.get("size") or data.get("playtime_minutes") or 0)
+                        if legacy_store == "amazon"
+                        else 0,
+                        str(data.get("last_synced") or ""),
+                    ),
+                )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_library_store "
+            "ON library(store, store_id)"
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -471,6 +616,10 @@ class Database:
         data["fps_limit"] = int(data.get("fps_limit", 0))
         data["is_steam"] = int(bool(data.get("is_steam", 0)))
         data["steam_appid"] = str(data.get("steam_appid") or "")
+        data["is_amazon"] = int(bool(data.get("is_amazon", 0)))
+        data["amazon_id"] = str(data.get("amazon_id") or "")
+        data["store"] = str(data.get("store") or "")
+        data["store_id"] = str(data.get("store_id") or "")
         data["winetricks_verbs"] = str(data.get("winetricks_verbs") or "")
         data["winetricks_auto"] = int(bool(data.get("winetricks_auto", 0)))
         data["winetricks_state"] = str(data.get("winetricks_state") or "")
@@ -523,13 +672,15 @@ class Database:
         if data["fps_limit"] not in FPS_LIMITS:
             data["fps_limit"] = 0
         data["is_steam"] = 1 if data["is_steam"] else 0
+        data["is_amazon"] = 1 if data["is_amazon"] else 0
         data["winetricks_auto"] = 1 if data["winetricks_auto"] else 0
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "INSERT INTO library(name, exe_path, runner_path, wine_prefix, "
                 "env_vars, launch_args, scaling_mode, fps_limit, is_steam, "
-                "steam_appid, cover_path, winetricks_verbs, winetricks_auto, "
-                "winetricks_state) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "steam_appid, is_amazon, amazon_id, store, store_id, cover_path, "
+                "winetricks_verbs, winetricks_auto, winetricks_state) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     data["name"],
                     data["exe_path"],
@@ -541,6 +692,10 @@ class Database:
                     data["fps_limit"],
                     data["is_steam"],
                     str(data["steam_appid"]),
+                    data["is_amazon"],
+                    str(data["amazon_id"]),
+                    str(data["store"]),
+                    str(data["store_id"]),
                     data["cover_path"],
                     str(data["winetricks_verbs"]),
                     data["winetricks_auto"],
@@ -567,6 +722,8 @@ class Database:
                 allowed["fps_limit"] = 0
         if "is_steam" in allowed:
             allowed["is_steam"] = 1 if allowed["is_steam"] else 0
+        if "is_amazon" in allowed:
+            allowed["is_amazon"] = 1 if allowed["is_amazon"] else 0
         if "winetricks_auto" in allowed:
             allowed["winetricks_auto"] = 1 if allowed["winetricks_auto"] else 0
         assignments = ", ".join(f"{field} = ?" for field in allowed)
@@ -589,6 +746,32 @@ class Database:
             self.update_game(existing["id"], **updates)
             return existing["id"], False
         values["is_steam"] = 1
+        values["store"] = "steam"
+        values["store_id"] = str(values.get("steam_appid", ""))
+        return self.add_game(**values), True
+
+    def find_amazon_game(self, product_id: str | int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM library WHERE amazon_id = ?", (str(product_id),)
+            ).fetchone()
+        return self._clean_row(row) if row else None
+
+    def upsert_amazon_game(self, **values: Any) -> tuple[int, bool]:
+        """Insert an Amazon entry, or refresh only safe metadata of an existing one."""
+        product_id = str(values.get("amazon_id", ""))
+        existing = self.find_amazon_game(product_id) if product_id else None
+        if existing:
+            updates: dict[str, Any] = {"name": values.get("name", existing["name"])}
+            if values.get("cover_path"):
+                updates["cover_path"] = values["cover_path"]
+            if values.get("exe_path"):
+                updates["exe_path"] = values["exe_path"]
+            self.update_game(existing["id"], **updates)
+            return existing["id"], False
+        values["is_amazon"] = 1
+        values["store"] = "amazon"
+        values["store_id"] = str(values.get("amazon_id", ""))
         return self.add_game(**values), True
 
     def delete_game(self, game_id: int) -> None:
@@ -604,24 +787,29 @@ class Database:
         """Replace the cached owned-game list while preserving local covers."""
         with self._lock:
             existing = {
-                str(row["appid"]): str(row["cover_path"] or "")
+                str(row["appid"]): (
+                    str(row["cover_path"] or ""),
+                    int(row["size"] or 0),
+                )
                 for row in self._conn.execute(
-                    "SELECT appid, cover_path FROM steam_library"
+                    "SELECT appid, cover_path, size FROM steam_library"
                 ).fetchall()
             }
-        rows: list[tuple[str, str, int, int, str, str]] = []
+        rows: list[tuple[str, str, int, int, str, int, str]] = []
         for game in games:
             appid = str(game.get("appid", "")).strip()
             name = str(game.get("name", "")).strip()
             if not appid or not name:
                 continue
+            previous_cover, previous_size = existing.get(appid, ("", 0))
             rows.append(
                 (
                     appid,
                     name,
                     int(game.get("playtime_minutes", 0) or 0),
                     1 if game.get("installed") else 0,
-                    str(game.get("cover_path") or existing.get(appid, "")),
+                    str(game.get("cover_path") or previous_cover),
+                    int(game.get("size", 0) or previous_size or 0),
                     synced_at,
                 )
             )
@@ -629,7 +817,8 @@ class Database:
             self._conn.execute("DELETE FROM steam_library")
             self._conn.executemany(
                 "INSERT INTO steam_library(appid, name, playtime_minutes, "
-                "installed, cover_path, last_synced) VALUES(?, ?, ?, ?, ?, ?)",
+                "installed, cover_path, size, last_synced) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
 
@@ -660,6 +849,7 @@ class Database:
             item["playtime_minutes"] = int(item.get("playtime_minutes", 0) or 0)
             item["installed"] = int(bool(item.get("installed", 0)))
             item["cover_path"] = str(item.get("cover_path") or "")
+            item["size"] = int(item.get("size", 0) or 0)
             result.append(item)
         return result
 
@@ -675,6 +865,7 @@ class Database:
         item["playtime_minutes"] = int(item.get("playtime_minutes", 0) or 0)
         item["installed"] = int(bool(item.get("installed", 0)))
         item["cover_path"] = str(item.get("cover_path") or "")
+        item["size"] = int(item.get("size", 0) or 0)
         return item
 
     def set_steam_cover(self, appid: str, cover_path: str) -> None:
@@ -682,6 +873,13 @@ class Database:
             self._conn.execute(
                 "UPDATE steam_library SET cover_path = ? WHERE appid = ?",
                 (str(cover_path), str(appid)),
+            )
+
+    def set_steam_size(self, appid: str, size: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE steam_library SET size = ? WHERE appid = ?",
+                (int(size or 0), str(appid)),
             )
 
     def set_steam_installed(self, appids: Iterable[str]) -> None:
@@ -703,6 +901,372 @@ class Database:
             "total": int(row["total"] or 0) if row is not None else 0,
             "installed": int(row["installed"] or 0) if row is not None else 0,
         }
+
+    # ------------------------------------------------------------ Amazon catalog
+    def replace_amazon_library(
+        self,
+        games: Iterable[dict[str, Any]],
+        synced_at: str = "",
+    ) -> None:
+        """Replace the cached Amazon list while preserving local covers."""
+        with self._lock:
+            existing = {
+                str(row["product_id"]): (
+                    str(row["cover_path"] or ""),
+                    str(row["spec_json"] or ""),
+                )
+                for row in self._conn.execute(
+                    "SELECT product_id, cover_path, spec_json FROM amazon_library"
+                ).fetchall()
+            }
+        rows: list[tuple[str, str, str, str, str, str, str, str, int, str, str, int, str, str]] = []
+        for game in games:
+            product_id = str(game.get("product_id", "")).strip()
+            title = str(game.get("title", "")).strip()
+            if not product_id or not title:
+                continue
+            previous_cover, previous_spec = existing.get(product_id, ("", ""))
+            rows.append(
+                (
+                    product_id,
+                    str(game.get("entitlement_id", "") or ""),
+                    title,
+                    str(game.get("description", "") or ""),
+                    str(game.get("developer", "") or ""),
+                    str(game.get("icon_url", "") or ""),
+                    str(game.get("cover_url", "") or ""),
+                    str(game.get("cover_path") or previous_cover),
+                    1 if game.get("installed") else 0,
+                    str(game.get("install_path", "") or ""),
+                    str(game.get("version", "") or ""),
+                    int(game.get("size", 0) or 0),
+                    str(game.get("spec_json") or previous_spec),
+                    synced_at,
+                )
+            )
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM amazon_library")
+            self._conn.executemany(
+                "INSERT INTO amazon_library(product_id, entitlement_id, title, "
+                "description, developer, icon_url, cover_url, cover_path, "
+                "installed, install_path, version, size, spec_json, last_synced) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    def _clean_amazon_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["product_id"] = str(item.get("product_id") or "")
+        item["entitlement_id"] = str(item.get("entitlement_id") or "")
+        item["installed"] = int(bool(item.get("installed", 0)))
+        item["install_path"] = str(item.get("install_path") or "")
+        item["version"] = str(item.get("version") or "")
+        item["size"] = int(item.get("size", 0) or 0)
+        item["cover_path"] = str(item.get("cover_path") or "")
+        item["cover_url"] = str(item.get("cover_url") or "")
+        item["icon_url"] = str(item.get("icon_url") or "")
+        item["description"] = str(item.get("description") or "")
+        item["developer"] = str(item.get("developer") or "")
+        item["spec_json"] = str(item.get("spec_json") or "")
+        return item
+
+    def list_amazon_library(
+        self,
+        search: str = "",
+        installed: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if search.strip():
+            clauses.append("title LIKE ? COLLATE NOCASE")
+            params.append(f"%{search.strip()}%")
+        if installed is not None:
+            clauses.append("installed = ?")
+            params.append(1 if installed else 0)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM amazon_library {where} "
+                "ORDER BY installed DESC, title COLLATE NOCASE",
+                params,
+            ).fetchall()
+        return [self._clean_amazon_row(row) for row in rows]
+
+    def get_amazon_library_game(self, product_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM amazon_library WHERE product_id = ?",
+                (str(product_id),),
+            ).fetchone()
+        return self._clean_amazon_row(row) if row else None
+
+    def set_amazon_cover(self, product_id: str, cover_path: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE amazon_library SET cover_path = ? WHERE product_id = ?",
+                (str(cover_path), str(product_id)),
+            )
+
+    def set_amazon_spec(self, product_id: str, spec_json: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE amazon_library SET spec_json = ? WHERE product_id = ?",
+                (str(spec_json), str(product_id)),
+            )
+
+    def update_amazon_install(
+        self,
+        product_id: str,
+        *,
+        installed: bool,
+        install_path: str = "",
+        version: str = "",
+        size: int = 0,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE amazon_library SET installed = ?, install_path = ?, "
+                "version = ?, size = ? WHERE product_id = ?",
+                (
+                    1 if installed else 0,
+                    str(install_path or ""),
+                    str(version or ""),
+                    int(size or 0),
+                    str(product_id),
+                ),
+            )
+
+    def amazon_library_stats(self) -> dict[str, int]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total, COALESCE(SUM(installed), 0) AS installed "
+                "FROM amazon_library"
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0) if row is not None else 0,
+            "installed": int(row["installed"] or 0) if row is not None else 0,
+        }
+
+    def clear_amazon_library(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM amazon_library")
+
+    def delete_amazon_games(self) -> int:
+        """Remove Amazon entries from the main library (game files stay)."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM library WHERE is_amazon = 1"
+            )
+        return int(cursor.rowcount or 0)
+
+    # ------------------------------------------------------- generic store data
+    def find_store_game(self, store: str, store_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM library WHERE store = ? AND store_id = ?",
+                (str(store), str(store_id)),
+            ).fetchone()
+        return self._clean_row(row) if row else None
+
+    def upsert_store_game(self, store: str, **values: Any) -> tuple[int, bool]:
+        store_id = str(values.get("store_id", "") or "")
+        existing = self.find_store_game(store, store_id) if store_id else None
+        if existing:
+            updates: dict[str, Any] = {
+                "name": values.get("name", existing["name"])
+            }
+            if values.get("cover_path"):
+                updates["cover_path"] = values["cover_path"]
+            if values.get("exe_path"):
+                updates["exe_path"] = values["exe_path"]
+            self.update_game(existing["id"], **updates)
+            return existing["id"], False
+        values["store"] = store
+        values["store_id"] = store_id
+        return self.add_game(**values), True
+
+    def replace_store_library(
+        self,
+        store: str,
+        games: Iterable[dict[str, Any]],
+        synced_at: str = "",
+    ) -> None:
+        with self._lock:
+            existing = {
+                str(row["store_id"]): (
+                    str(row["cover_path"] or ""),
+                    str(row["spec_json"] or ""),
+                    str(row["extra_json"] or ""),
+                    int(row["size"] or 0),
+                )
+                for row in self._conn.execute(
+                    "SELECT store_id, cover_path, spec_json, extra_json, size "
+                    "FROM store_library WHERE store = ?",
+                    (str(store),),
+                ).fetchall()
+            }
+        rows: list[tuple[str, str, str, str, str, str, str, str, int, str, str, int, str, str, str]] = []
+        for game in games:
+            store_id = str(game.get("store_id", "") or "").strip()
+            title = str(game.get("title", "") or "").strip()
+            if not store_id or not title:
+                continue
+            previous_cover, previous_spec, previous_extra, previous_size = existing.get(
+                store_id, ("", "", "", 0)
+            )
+            rows.append(
+                (
+                    str(store),
+                    store_id,
+                    title,
+                    str(game.get("description", "") or ""),
+                    str(game.get("developer", "") or ""),
+                    str(game.get("icon_url", "") or ""),
+                    str(game.get("cover_url", "") or ""),
+                    str(game.get("cover_path") or previous_cover),
+                    1 if game.get("installed") else 0,
+                    str(game.get("install_path", "") or ""),
+                    str(game.get("version", "") or ""),
+                    int(game.get("size", 0) or previous_size or 0),
+                    str(game.get("spec_json") or previous_spec),
+                    str(game.get("extra_json") or previous_extra),
+                    synced_at,
+                )
+            )
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM store_library WHERE store = ?", (str(store),)
+            )
+            self._conn.executemany(
+                "INSERT INTO store_library(store, store_id, title, description, "
+                "developer, icon_url, cover_url, cover_path, installed, "
+                "install_path, version, size, spec_json, extra_json, last_synced) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    def _clean_store_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        item["store"] = str(item.get("store") or "")
+        item["store_id"] = str(item.get("store_id") or "")
+        item["installed"] = int(bool(item.get("installed", 0)))
+        item["install_path"] = str(item.get("install_path") or "")
+        item["version"] = str(item.get("version") or "")
+        item["size"] = int(item.get("size", 0) or 0)
+        item["cover_path"] = str(item.get("cover_path") or "")
+        item["cover_url"] = str(item.get("cover_url") or "")
+        item["icon_url"] = str(item.get("icon_url") or "")
+        item["description"] = str(item.get("description") or "")
+        item["developer"] = str(item.get("developer") or "")
+        item["spec_json"] = str(item.get("spec_json") or "")
+        item["extra_json"] = str(item.get("extra_json") or "")
+        return item
+
+    def list_store_library(
+        self,
+        store: str,
+        search: str = "",
+        installed: int | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = ["store = ?"]
+        params: list[Any] = [str(store)]
+        if search.strip():
+            clauses.append("title LIKE ? COLLATE NOCASE")
+            params.append(f"%{search.strip()}%")
+        if installed is not None:
+            clauses.append("installed = ?")
+            params.append(1 if installed else 0)
+        where = " AND ".join(clauses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM store_library WHERE {where} "
+                "ORDER BY installed DESC, title COLLATE NOCASE",
+                params,
+            ).fetchall()
+        return [self._clean_store_row(row) for row in rows]
+
+    def get_store_library_game(
+        self, store: str, store_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM store_library WHERE store = ? AND store_id = ?",
+                (str(store), str(store_id)),
+            ).fetchone()
+        return self._clean_store_row(row) if row else None
+
+    def set_store_cover(self, store: str, store_id: str, cover_path: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE store_library SET cover_path = ? "
+                "WHERE store = ? AND store_id = ?",
+                (str(cover_path), str(store), str(store_id)),
+            )
+
+    def set_store_size(self, store: str, store_id: str, size: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE store_library SET size = ? "
+                "WHERE store = ? AND store_id = ?",
+                (int(size or 0), str(store), str(store_id)),
+            )
+
+    def set_store_spec(self, store: str, store_id: str, spec_json: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE store_library SET spec_json = ? "
+                "WHERE store = ? AND store_id = ?",
+                (str(spec_json), str(store), str(store_id)),
+            )
+
+    def update_store_install(
+        self,
+        store: str,
+        store_id: str,
+        *,
+        installed: bool,
+        install_path: str = "",
+        version: str = "",
+        size: int = 0,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE store_library SET installed = ?, install_path = ?, "
+                "version = ?, size = ? WHERE store = ? AND store_id = ?",
+                (
+                    1 if installed else 0,
+                    str(install_path or ""),
+                    str(version or ""),
+                    int(size or 0),
+                    str(store),
+                    str(store_id),
+                ),
+            )
+
+    def store_library_stats(self, store: str) -> dict[str, int]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total, COALESCE(SUM(installed), 0) AS installed "
+                "FROM store_library WHERE store = ?",
+                (str(store),),
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0) if row is not None else 0,
+            "installed": int(row["installed"] or 0) if row is not None else 0,
+        }
+
+    def clear_store_library(self, store: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM store_library WHERE store = ?", (str(store),)
+            )
+
+    def delete_store_games(self, store: str) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM library WHERE store = ?", (str(store),)
+            )
+        return int(cursor.rowcount or 0)
 
     # -------------------------------------------------------------------- caches
     def clear_shader_cache(self, game_id: int | None = None) -> int:
@@ -757,4 +1321,14 @@ class Database:
                     "SELECT COUNT(*) FROM library WHERE is_steam = 1"
                 ).fetchone()[0]
             )
-        return {"games": games, "steam": steam}
+            amazon = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM library WHERE is_amazon = 1"
+                ).fetchone()[0]
+            )
+            stores = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM library WHERE store <> ''"
+                ).fetchone()[0]
+            )
+        return {"games": games, "steam": steam, "amazon": amazon, "stores": stores}

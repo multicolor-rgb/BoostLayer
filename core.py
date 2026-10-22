@@ -19,12 +19,14 @@ import struct
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable
@@ -1837,6 +1839,7 @@ class SteamManifest:
     installdir: str
     library: Path
     state_flags: int = 0
+    size: int = 0
 
 
 def read_steam_manifests(root: Path) -> list[SteamManifest]:
@@ -1872,8 +1875,14 @@ def read_steam_manifests(root: Path) -> list[SteamManifest]:
                 state_flags = int(_acf_value(text, "StateFlags") or 0)
             except ValueError:
                 state_flags = 0
+            try:
+                size = int(_acf_value(text, "SizeOnDisk") or 0)
+            except ValueError:
+                size = 0
             manifests.append(
-                SteamManifest(appid, name, installdir, library, state_flags)
+                SteamManifest(
+                    appid, name, installdir, library, state_flags, size
+                )
             )
     return manifests
 
@@ -1982,8 +1991,15 @@ class SteamOwnedGamesWorker(QThread):
             games = fetch_steam_owned_games(self.api_key, self.steam_id64)
             root = detect_steam_root(self.steam_root)
             installed = steam_installed_appids(root)
+            sizes: dict[str, int] = {}
+            if root is not None:
+                for manifest in read_steam_manifests(root):
+                    if manifest.size > 0:
+                        sizes[manifest.appid] = manifest.size
             for game in games:
                 game["installed"] = 1 if game["appid"] in installed else 0
+                if game["installed"]:
+                    game["size"] = sizes.get(game["appid"], 0)
             self.result.emit({"ok": True, "games": games})
         except Exception as exc:
             log.error("Steam library fetch failed: %s", traceback.format_exc())
@@ -2007,6 +2023,58 @@ class SteamCoverWorker(QThread):
         except Exception:
             path = ""
         self.result.emit(self.appid, path)
+
+
+class SteamCoverBatchWorker(QThread):
+    progress = pyqtSignal(str)
+    cover_ready = pyqtSignal(str, str)
+    done = pyqtSignal()
+
+    def __init__(
+        self,
+        appids: Iterable[str],
+        root: Path,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.appids = [str(appid) for appid in appids]
+        self.root = root
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        total = len(self.appids)
+        completed = 0
+        try:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {
+                    pool.submit(ensure_steam_cover, appid, self.root): appid
+                    for appid in self.appids
+                }
+                for future in as_completed(futures):
+                    if self._cancel.is_set():
+                        for pending in futures:
+                            pending.cancel()
+                        break
+                    appid = futures[future]
+                    try:
+                        path = future.result()
+                    except Exception:
+                        path = ""
+                    completed += 1
+                    if path:
+                        self.cover_ready.emit(appid, path)
+                    self.progress.emit(
+                        tr(
+                            "Pobieram okładki Steam: {done}/{total}",
+                            done=completed,
+                            total=total,
+                        )
+                    )
+        finally:
+            self.done.emit()
 
 
 def steam_uri_command(uri: str) -> list[str]:
@@ -2323,6 +2391,8 @@ class SteamSyncWorker(QThread):
                     steam_appid=manifest.appid,
                     cover_path=cover,
                 )
+                if manifest.size > 0:
+                    database.set_steam_size(manifest.appid, manifest.size)
                 if created:
                     added += 1
                 else:
