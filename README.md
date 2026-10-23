@@ -6,6 +6,8 @@ Backend korzysta wyłącznie z biblioteki standardowej Pythona (`sqlite3`,
 `urllib`, `tarfile`, `subprocess`, `shlex`, `re`). Jedyną zewnętrzną zależnością
 runtime jest **PyQt6**.
 
+Strona projektu: **<https://multicolor-rgb.github.io/boostlayer/>** (PL / EN)
+
 ## Funkcje
 
 - **Biblioteka** — nowoczesny interfejs w stylu Epic Games Store:
