@@ -20,10 +20,16 @@ runtime jest **PyQt6**.
   aplikacji.
 - **Ikona** — biały monogram BL na czarnym tle, spójny w oknie, trayu,
   menu i pakietach AppImage/.deb (pełny zestaw PNG/SVG).
-- **Tryb konsolowy** — pełnoekranowy Big Picture z dużymi okładkami,
-  dynamicznym tłem z okładki, kinową poświatą motywu i obsługą pada
-  (`/dev/input/js*`). Po zakończeniu gry standalone wraca automatycznie do
-  konsoli; dla gier Steam działa wykrywanie best-effort.
+- **Biblioteka** — siatka dużych okładek z tytułem i metadanymi pod
+  spodem, rząd **Kontynuuj** z ostatnio granymi grami, filtry źródła,
+  sortowanie (w tym „Ostatnio grane”) i nawigacja klawiaturą.
+- **Tryb konsolowy** — kinowy Big Picture: duży hero z tytułem i akcjami,
+  pływająca okładka, rozmyte tło z crossfade i pozioma karuzela okładek.
+  Obsługa pada (`/dev/input/js*`), kółka myszy i klawiatury; po zakończeniu
+  gry standalone konsola wraca automatycznie, dla Steam działa wykrywanie
+  best-effort.
+- **Powiadomienia** — pływająca pigułka z ikoną i wygaszaniem zamiast
+  wpisu w pasku statusu; delikatne przejścia między stronami.
 - **Tray i hotkey** — stylowane menu z ostatnimi grami; `Ctrl+Alt+S`
   pokazuje/ukrywa okno (X11 przez `XGrabKey`, na Wayland lokalny fallback).
 - **Minimalizacja** — po starcie gry Boostlayer minimalizuje się do paska

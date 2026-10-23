@@ -216,45 +216,33 @@ CONSOLE_QSS = """
 QWidget#ConsoleRoot {
     background: transparent;
 }
-QLabel#ConsoleBackdrop {
+QWidget#ConsoleHeroArea, QWidget#ConsoleHeroContent {
     background: transparent;
-}
-QFrame#ConsoleShade {
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(6, 6, 8, 150),
-        stop:0.45 rgba(8, 8, 10, 210),
-        stop:1 ${bg});
-}
-QFrame#ConsoleHeader {
-    background: rgba(14, 14, 16, 0.82);
-    border: 1px solid ${border};
-    border-radius: ${radius_lg};
 }
 QLabel#ConsoleBrand {
     color: ${text};
-    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
-    font-size: 13pt;
+    font-size: 14pt;
     font-weight: 800;
 }
 QLabel#ConsoleKicker {
-    color: ${muted};
-    font-size: 8pt;
-    letter-spacing: 1px;
+    color: ${accent};
+    font-size: 8.5pt;
+    font-weight: 700;
+    letter-spacing: 1.6px;
 }
 QLabel#ConsoleClock {
     color: ${text};
-    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
-    font-size: 12pt;
+    font-size: 13pt;
     font-weight: 700;
     padding: 0 12px;
 }
 QLabel#ConsolePad {
     color: ${muted};
-    background: ${surface};
+    background: rgba(20, 20, 24, 0.7);
     border: 1px solid ${border};
-    border-radius: 8px;
-    padding: 5px 10px;
-    font-size: 8pt;
+    border-radius: 10px;
+    padding: 6px 12px;
+    font-size: 8.5pt;
 }
 QLabel#ConsolePad[available="true"] {
     color: ${success};
@@ -262,24 +250,23 @@ QLabel#ConsolePad[available="true"] {
 }
 QLabel#ConsoleMuted {
     color: ${muted};
-    font-size: 9pt;
+    font-size: 11pt;
 }
 QLabel#ConsoleTitle {
-    color: ${text};
-    font-size: 22pt;
+    color: #FFFFFF;
+    font-size: 40pt;
     font-weight: 800;
+    letter-spacing: -0.5px;
 }
 QLabel#ConsoleCover {
     background: ${surface};
-    border: 1px solid ${border};
-    border-radius: ${radius_lg};
-    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 18px;
 }
 QListWidget#ConsoleTiles {
     background: transparent;
     border: 0;
     outline: none;
-    padding: 4px;
 }
 QListWidget#ConsoleTiles::item {
     background: transparent;
@@ -287,48 +274,39 @@ QListWidget#ConsoleTiles::item {
     padding: 0;
     margin: 0;
 }
-QFrame#ConsoleDetails {
-    background: rgba(18, 18, 20, 0.86);
-    border: 1px solid ${border};
-    border-radius: ${radius_xl};
-}
-QFrame#ConsoleChips {
-    background: transparent;
-    border: 0;
-}
 QLabel#ConsoleChip {
     color: ${text};
-    background: ${surface_alt};
-    border: 1px solid ${border};
-    border-radius: 7px;
-    padding: 5px 9px;
-    font-size: 8pt;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    padding: 6px 12px;
+    font-size: 9.5pt;
     font-weight: 600;
 }
 QFrame#ConsoleFooterBar {
-    background: rgba(10, 10, 11, 0.88);
+    background: rgba(10, 10, 12, 0.72);
     border: 1px solid ${border};
-    border-radius: 10px;
+    border-radius: 12px;
 }
 QLabel#ConsoleKey {
     color: ${on_accent};
     background: ${accent};
-    border-radius: 5px;
-    padding: 3px 8px;
-    font-size: 8pt;
+    border-radius: 6px;
+    padding: 3px 9px;
+    font-size: 9pt;
     font-weight: 800;
 }
 QLabel#ConsoleKeyLabel {
     color: ${muted};
-    font-size: 8pt;
+    font-size: 9.5pt;
 }
 QPushButton#ConsolePrimary {
     background: ${accent};
     color: ${on_accent};
     border: 1px solid ${accent};
-    border-radius: ${radius};
-    padding: 14px;
-    font-size: 11pt;
+    border-radius: 12px;
+    padding: 15px 34px;
+    font-size: 13pt;
     font-weight: 800;
 }
 QPushButton#ConsolePrimary:hover {
@@ -336,15 +314,17 @@ QPushButton#ConsolePrimary:hover {
     border-color: ${accent_hover};
 }
 QPushButton#ConsoleGhost {
-    background: transparent;
-    color: ${muted};
-    border: 1px solid ${border_strong};
-    border-radius: 8px;
-    padding: 9px 12px;
+    background: rgba(20, 20, 24, 0.6);
+    color: ${text};
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 12px;
+    padding: 14px 24px;
+    font-size: 11pt;
+    font-weight: 700;
 }
 QPushButton#ConsoleGhost:hover {
-    color: ${text};
     border-color: ${accent};
+    color: ${accent};
 }
 """
 

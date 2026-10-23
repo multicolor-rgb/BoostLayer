@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import html
 import json
 import os
@@ -19,6 +20,7 @@ from typing import Any, Iterable
 from PyQt6.QtCore import (
     QByteArray,
     QCoreApplication,
+    QEasingCurve,
     QEvent,
     QEventLoop,
     QLibraryInfo,
@@ -26,6 +28,7 @@ from PyQt6.QtCore import (
     QPoint,
     QPointF,
     QProcess,
+    QPropertyAnimation,
     QRect,
     QRectF,
     QSize,
@@ -33,15 +36,19 @@ from PyQt6.QtCore import (
     QTimer,
     QTranslator,
     QUrl,
+    QVariantAnimation,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QDesktopServices,
-    QGuiApplication,
     QFont,
+    QFontMetrics,
+    QGuiApplication,
     QIcon,
+    QKeyEvent,
     QKeySequence,
     QLinearGradient,
     QMouseEvent,
@@ -50,6 +57,7 @@ from PyQt6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
+    QRadialGradient,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -65,6 +73,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -531,11 +540,11 @@ QWidget#CardOverlay {
 QPushButton#OverlayPlay {
     background: ${accent};
     border: 1px solid ${accent};
-    border-radius: 24px;
-    min-width: 48px;
-    max-width: 48px;
-    min-height: 48px;
-    max-height: 48px;
+    border-radius: 26px;
+    min-width: 52px;
+    max-width: 52px;
+    min-height: 52px;
+    max-height: 52px;
 }
 QPushButton#OverlayPlay:hover {
     background: ${accent_hover};
@@ -671,6 +680,27 @@ QPushButton#FilterButton {
     padding: 7px 12px;
     font-size: 9pt;
     font-weight: 600;
+}
+QPushButton#Segment {
+    background: ${surface};
+    color: ${muted};
+    border: 1px solid ${border};
+    padding: 7px 14px;
+    font-size: 9pt;
+    font-weight: 600;
+    border-radius: 0px;
+}
+QPushButton#Segment:first-child {
+    border-top-left-radius: 8px;
+    border-bottom-left-radius: 8px;
+}
+QPushButton#Segment:hover {
+    color: ${text};
+}
+QPushButton#Segment:checked {
+    color: ${accent};
+    background: ${accent_soft};
+    border-color: ${accent};
 }
 QPushButton#FilterButton:hover {
     color: ${text};
@@ -942,6 +972,13 @@ QTabBar::tab:selected {
     border-bottom: 2px solid ${accent};
 }
 
+QPushButton:focus, QToolButton:focus {
+    border-color: ${accent};
+}
+QListView:focus, QTreeWidget:focus, QTableWidget:focus {
+    border-color: ${accent};
+}
+
 /* ------------------------------------------------------------ status / misc */
 QFrame#StatusBar {
     background: ${bg_dark};
@@ -950,6 +987,16 @@ QFrame#StatusBar {
 QLabel#StatusText {
     color: ${muted};
     font-size: 8.5pt;
+}
+QFrame#ToastPill {
+    background: ${surface_alt};
+    border: 1px solid ${border_strong};
+    border-radius: 18px;
+}
+QLabel#ToastText {
+    color: ${text};
+    font-size: 9.5pt;
+    font-weight: 600;
 }
 QLabel#GhostBadge {
     color: ${muted};
@@ -1266,16 +1313,24 @@ def game_source(game: dict[str, Any]) -> str:
 
 
 class CoverView(QWidget):
-    """Rounded, aspect-filled cover with a generated fallback."""
+    """Rounded cover with hover zoom, selection ring and a generated fallback."""
 
     def __init__(
-        self, title: str, pixmap: QPixmap | None = None, source: str = "", parent=None
+        self,
+        title: str,
+        pixmap: QPixmap | None = None,
+        source: str = "",
+        parent=None,
+        radius: float = 12.0,
     ) -> None:
         super().__init__(parent)
         self.title = title
         self.pixmap = pixmap
         self.source = (source or "").strip().upper()
+        self.radius = float(radius)
         self._hover = False
+        self._selected = False
+        self._zoom = 1.0
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
         self.setMinimumSize(32, 42)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -1287,24 +1342,62 @@ class CoverView(QWidget):
         self.pixmap = pixmap
         self.update()
 
-    def enterEvent(self, event: QEvent) -> None:
+    def set_zoom(self, value: float) -> None:
+        self._zoom = float(value)
+        self.update()
+
+    def set_selected(self, selected: bool) -> None:
+        if self._selected != selected:
+            self._selected = selected
+            self.update()
+
+    def enterEvent(self, event: QEvent) -> None:  # noqa: N802
         self._hover = True
         self.update()
         super().enterEvent(event)
 
-    def leaveEvent(self, event: QEvent) -> None:
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802
         self._hover = False
         self.update()
         super().leaveEvent(event)
 
+    def _paint_fallback(self, painter: QPainter, rect: QRectF) -> None:
+        digest = hashlib.md5(self.title.encode("utf-8", "replace")).hexdigest()
+        hue = int(digest[:4], 16) % 360
+        top = QColor.fromHsv(hue, 120, 128)
+        bottom = QColor.fromHsv((hue + 36) % 360, 170, 36)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0.0, top)
+        gradient.setColorAt(1.0, bottom)
+        painter.fillRect(rect, gradient)
+        glow = QRadialGradient(rect.left() + rect.width() * 0.3, rect.top() + rect.height() * 0.22, rect.width() * 0.9)
+        glow.setColorAt(0.0, QColor(255, 255, 255, 70))
+        glow.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(rect, glow)
+        initials = "".join(
+            part[0] for part in re.split(r"\W+", self.title) if part
+        )[:2].upper() or "B"
+        font = QFont("DejaVu Sans")
+        font.setPixelSize(max(18, int(rect.width() * 0.30)))
+        font.setWeight(QFont.Weight.Black)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 235))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, initials)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         path = QPainterPath()
-        path.addRoundedRect(rect, 12, 12)
+        path.addRoundedRect(rect, self.radius, self.radius)
         painter.save()
         painter.setClipPath(path)
+        if self._zoom != 1.0:
+            cx, cy = self.width() / 2.0, self.height() / 2.0
+            painter.translate(cx, cy)
+            painter.scale(self._zoom, self._zoom)
+            painter.translate(-cx, -cy)
         if self.pixmap is not None and not self.pixmap.isNull():
             scaled = self.pixmap.scaled(
                 self.size(),
@@ -1319,44 +1412,37 @@ class CoverView(QWidget):
                 QRect(source_x, source_y, self.width(), self.height()),
             )
         else:
-            theme = get_theme()
-            gradient = QLinearGradient(0, 0, self.width(), self.height())
-            gradient.setColorAt(0.0, QColor(theme.surface_alt))
-            gradient.setColorAt(0.55, QColor(theme.surface))
-            gradient.setColorAt(1.0, QColor(theme.background_dark))
-            painter.fillRect(self.rect(), gradient)
-            initials = "".join(
-                part[0] for part in re.split(r"\W+", self.title) if part
-            )[:2].upper() or "B"
-            font = QFont("DejaVu Sans", max(20, min(44, self.width() // 4)))
-            font.setWeight(QFont.Weight.Black)
-            painter.setFont(font)
-            initial_color = QColor(theme.accent)
-            initial_color.setAlpha(120)
-            painter.setPen(initial_color)
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, initials)
+            self._paint_fallback(painter, QRectF(self.rect()))
 
-        overlay = QLinearGradient(0, self.height() * 0.6, 0, self.height())
-        overlay.setColorAt(0.0, QColor(0, 0, 0, 0))
-        overlay.setColorAt(1.0, QColor(0, 0, 0, 130))
-        painter.fillRect(self.rect(), overlay)
+        shade = QLinearGradient(0, self.height() * 0.55, 0, self.height())
+        shade.setColorAt(0.0, QColor(0, 0, 0, 0))
+        shade.setColorAt(1.0, QColor(0, 0, 0, 150))
+        painter.fillRect(self.rect(), shade)
         if self.source:
-            badge = QRectF(10, 10, 74, 20)
-            painter.setBrush(QColor(0, 0, 0, 150))
+            badge_font = QFont("DejaVu Sans", 7, QFont.Weight.Bold)
+            painter.setFont(badge_font)
+            width = QFontMetrics(badge_font).horizontalAdvance(self.source) + 16
+            badge = QRectF(10, 10, width, 20)
+            painter.setBrush(QColor(0, 0, 0, 165))
             painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
-            painter.drawRoundedRect(badge, 5, 5)
-            painter.setFont(QFont("DejaVu Sans", 7, QFont.Weight.DemiBold))
-            painter.setPen(QColor(255, 255, 255, 225))
+            painter.drawRoundedRect(badge, 6, 6)
+            painter.setPen(QColor(255, 255, 255, 230))
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, self.source)
         painter.restore()
 
-        theme = get_theme()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        if self._hover:
-            painter.setPen(QPen(QColor(theme.accent), 1.6))
+        theme = get_theme()
+        if self._selected:
+            painter.setPen(QPen(QColor(theme.accent), 2.2))
+            painter.drawRoundedRect(rect.adjusted(-0.5, -0.5, 0.5, 0.5), self.radius, self.radius)
+        elif self._hover:
+            accent = QColor(theme.accent)
+            accent.setAlpha(120)
+            painter.setPen(QPen(accent, 1.4))
+            painter.drawRoundedRect(rect, self.radius, self.radius)
         else:
             painter.setPen(QPen(QColor(255, 255, 255, 18), 1))
-        painter.drawRoundedRect(rect, 12, 12)
+            painter.drawRoundedRect(rect, self.radius, self.radius)
         painter.end()
 
 
@@ -2004,13 +2090,16 @@ class GameCard(QFrame):
     context_requested = pyqtSignal(int, object)
     selected = pyqtSignal(int)
 
+    CARD_WIDTH = 212
+    COVER_HEIGHT = 283
+
     def __init__(
         self, game: dict[str, Any], cover: QPixmap | None, parent=None
     ) -> None:
         super().__init__(parent)
         self.game = game
         self.setObjectName("Card")
-        self.setFixedWidth(196)
+        self.setFixedWidth(self.CARD_WIDTH)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
@@ -2019,20 +2108,20 @@ class GameCard(QFrame):
             )
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 2)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(9)
 
         self.cover = CoverView(
-            str(game.get("name", "?")), cover, game_source(game)
+            str(game.get("name", "?")), cover, game_source(game), radius=14
         )
-        self.cover.setFixedHeight(262)
+        self.cover.setFixedHeight(self.COVER_HEIGHT)
         layout.addWidget(self.cover)
 
         self.title = QLabel(str(game.get("name", tr("Bez nazwy"))))
         self.title.setObjectName("CardTitle")
         self.title.setToolTip(str(game.get("name", "")))
         self.title.setWordWrap(True)
-        self.title.setFixedHeight(36)
+        self.title.setFixedHeight(38)
         self.title.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         )
@@ -2050,9 +2139,7 @@ class GameCard(QFrame):
 
         self.overlay = QWidget(self)
         self.overlay.setObjectName("CardOverlay")
-        self.overlay.setAttribute(
-            Qt.WidgetAttribute.WA_StyledBackground, True
-        )
+        self.overlay.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         overlay_layout = QVBoxLayout(self.overlay)
         overlay_layout.setContentsMargins(10, 10, 10, 10)
         overlay_layout.setSpacing(0)
@@ -2075,11 +2162,16 @@ class GameCard(QFrame):
         self.play.clicked.connect(
             lambda: self.launch_requested.emit(int(self.game["id"]))
         )
-        overlay_layout.addWidget(
-            self.play, 0, Qt.AlignmentFlag.AlignHCenter
-        )
+        overlay_layout.addWidget(self.play, 0, Qt.AlignmentFlag.AlignHCenter)
         overlay_layout.addStretch(1)
         self.overlay.hide()
+
+        self._zoom = QVariantAnimation(self)
+        self._zoom.setDuration(170)
+        self._zoom.setStartValue(1.0)
+        self._zoom.setEndValue(1.045)
+        self._zoom.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._zoom.valueChanged.connect(lambda value: self.cover.set_zoom(float(value)))
 
     def _emit_menu(self) -> None:
         self.context_requested.emit(
@@ -2088,23 +2180,31 @@ class GameCard(QFrame):
         )
 
     def set_selected(self, selected: bool) -> None:
-        self.setProperty("selected", selected)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.update()
+        self.cover.set_selected(selected)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.overlay.setGeometry(self.cover.geometry())
 
+    def _animate_zoom(self, forward: bool) -> None:
+        self._zoom.stop()
+        self._zoom.setDirection(
+            QVariantAnimation.Direction.Forward
+            if forward
+            else QVariantAnimation.Direction.Backward
+        )
+        self._zoom.start()
+
     def enterEvent(self, event: QEvent) -> None:  # noqa: N802
         self.overlay.setGeometry(self.cover.geometry())
         self.overlay.show()
         self.overlay.raise_()
+        self._animate_zoom(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event: QEvent) -> None:  # noqa: N802
         self.overlay.hide()
+        self._animate_zoom(False)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -2116,6 +2216,69 @@ class GameCard(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.launch_requested.emit(int(self.game["id"]))
         super().mouseDoubleClickEvent(event)
+
+
+class RecentTile(QFrame):
+    """Small portrait tile for the 'Continue' row."""
+
+    launch_requested = pyqtSignal(int)
+    selected = pyqtSignal(int)
+
+    WIDTH = 124
+
+    def __init__(self, game: dict[str, Any], cover: QPixmap | None, parent=None) -> None:
+        super().__init__(parent)
+        self.game = game
+        self.setObjectName("RecentTile")
+        self.setFixedWidth(self.WIDTH)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.cover = CoverView(str(game.get("name", "?")), cover, game_source(game), radius=12)
+        self.cover.setFixedSize(self.WIDTH, int(self.WIDTH * 4 / 3))
+        layout.addWidget(self.cover)
+        title = QLabel(str(game.get("name", "")))
+        title.setObjectName("CardMeta")
+        title.setToolTip(str(game.get("name", "")))
+        layout.addWidget(title)
+        self._zoom = QVariantAnimation(self)
+        self._zoom.setDuration(170)
+        self._zoom.setStartValue(1.0)
+        self._zoom.setEndValue(1.05)
+        self._zoom.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._zoom.valueChanged.connect(lambda value: self.cover.set_zoom(float(value)))
+
+    def set_selected(self, selected: bool) -> None:
+        self.cover.set_selected(selected)
+
+    def _animate_zoom(self, forward: bool) -> None:
+        self._zoom.stop()
+        self._zoom.setDirection(
+            QVariantAnimation.Direction.Forward
+            if forward
+            else QVariantAnimation.Direction.Backward
+        )
+        self._zoom.start()
+
+    def enterEvent(self, event: QEvent) -> None:  # noqa: N802
+        self._animate_zoom(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802
+        self._animate_zoom(False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit(int(self.game["id"]))
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.launch_requested.emit(int(self.game["id"]))
+        super().mouseDoubleClickEvent(event)
+
 
 
 class CompactGameRow(QFrame):
@@ -4576,6 +4739,8 @@ class LibraryPage(QWidget):
     toast = pyqtSignal(str)
 
     VIEWS = {"grid": 0, "list": 1, "minimal": 2}
+    SORTS = ("name", "recent", "fps", "scaling")
+    RECENT_LIMIT = 6
 
     def __init__(self, database: Database, parent=None) -> None:
         super().__init__(parent)
@@ -4585,14 +4750,19 @@ class LibraryPage(QWidget):
         self._dirty_views: set[str] = set()
         self._selected_id = 0
         self._cards: dict[int, QWidget] = {}
+        self._recent_tiles: dict[int, RecentTile] = {}
         self._filter = ""
         self._source_filter: str | None = None
+        self._scroll_positions: dict[str, int] = {}
+        sort_mode = self.db.get_setting("library_sort", "name")
+        self._sort_mode = sort_mode if sort_mode in self.SORTS else "name"
         stored_view = self.db.get_setting("library_view", "grid")
         if stored_view == "compact":
             stored_view = "list"
         if stored_view not in self.VIEWS:
             stored_view = "grid"
         self._view_mode = stored_view
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(32, 26, 32, 22)
@@ -4623,25 +4793,60 @@ class LibraryPage(QWidget):
         self.hero.menu_requested.connect(self.context_requested.emit)
         outer.addWidget(self.hero)
 
+        self.recent_section = QWidget()
+        recent_outer = QVBoxLayout(self.recent_section)
+        recent_outer.setContentsMargins(0, 0, 0, 0)
+        recent_outer.setSpacing(10)
+        recent_title = QLabel(tr("Kontynuuj"))
+        recent_title.setObjectName("SectionTitle")
+        recent_outer.addWidget(recent_title)
+        self.recent_row = QHBoxLayout()
+        self.recent_row.setSpacing(16)
+        recent_outer.addLayout(self.recent_row)
+        outer.addWidget(self.recent_section)
+
         self.toolbar_widget = QWidget()
         toolbar = QHBoxLayout(self.toolbar_widget)
         toolbar.setContentsMargins(0, 0, 0, 0)
-        toolbar.setSpacing(8)
-        self.source_combo = QComboBox()
-        self.source_combo.addItem(tr("Wszystkie gry"), None)
-        self.source_combo.addItem(tr("Steam"), "steam")
-        self.source_combo.addItem(tr("Standalone"), "standalone")
-        self.source_combo.setMinimumWidth(140)
-        self.source_combo.currentIndexChanged.connect(self._source_selected)
-        toolbar.addWidget(self.source_combo)
+        toolbar.setSpacing(10)
+        self.segment_group = QButtonGroup(self)
+        self.segment_group.setExclusive(True)
+        self.source_buttons: dict[str, QPushButton] = {}
+        for value, label in (
+            (None, tr("Wszystkie")),
+            ("steam", tr("Steam")),
+            ("standalone", tr("Standalone")),
+        ):
+            key = value or ""
+            button = QPushButton(label)
+            button.setObjectName("Segment")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(partial(self._set_source, value))
+            self.segment_group.addButton(button)
+            self.source_buttons[key] = button
+            toolbar.addWidget(button)
+        self.source_buttons[""].setChecked(True)
 
-        self.sort_combo = QComboBox()
-        self.sort_combo.addItem(tr("Nazwa"), "name")
-        self.sort_combo.addItem(tr("FPS"), "fps")
-        self.sort_combo.addItem(tr("Skalowanie"), "scaling")
-        self.sort_combo.setMinimumWidth(140)
-        self.sort_combo.currentIndexChanged.connect(self._sort_selected)
-        toolbar.addWidget(self.sort_combo)
+        self.sort_button = QPushButton()
+        self.sort_button.setObjectName("FilterButton")
+        self.sort_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sort_menu = QMenu(self.sort_button)
+        self.sort_group = QActionGroup(self.sort_menu)
+        self.sort_group.setExclusive(True)
+        self._sort_actions: dict[str, QAction] = {}
+        for key in self.SORTS:
+            action = QAction(self._sort_label(key), self.sort_menu)
+            action.setCheckable(True)
+            action.setChecked(key == self._sort_mode)
+            action.triggered.connect(partial(self._set_sort, key))
+            self.sort_group.addAction(action)
+            self.sort_menu.addAction(action)
+            self._sort_actions[key] = action
+        self.sort_button.setMenu(self.sort_menu)
+        self._update_sort_label()
+        toolbar.addSpacing(6)
+        toolbar.addWidget(self.sort_button)
         toolbar.addStretch(1)
 
         self.view_group = QButtonGroup(self)
@@ -4706,12 +4911,40 @@ class LibraryPage(QWidget):
         outer.addWidget(self.stack, 1)
         self.reload()
 
+    # ------------------------------------------------------------ helpers
+    def _sort_label(self, key: str) -> str:
+        return {
+            "name": tr("Nazwa"),
+            "recent": tr("Ostatnio grane"),
+            "fps": tr("FPS"),
+            "scaling": tr("Skalowanie"),
+        }.get(key, key)
+
+    def _update_sort_label(self) -> None:
+        self.sort_button.setText(
+            tr("Sortuj: {name}", name=self._sort_label(self._sort_mode))
+        )
+
+    def _set_sort(self, key: str) -> None:
+        if key not in self.SORTS or key == self._sort_mode:
+            return
+        self._sort_mode = key
+        self.db.set_setting("library_sort", key)
+        self._update_sort_label()
+        self.reload()
+
+    def _set_source(self, value: str | None) -> None:
+        self._source_filter = value
+        self.reload()
+
     def _make_grid_view(self) -> tuple[QScrollArea, FlowLayout]:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         style_scroll_area(scroll)
         host = QWidget()
-        layout = FlowLayout(host, margin=2, h_spacing=18, v_spacing=18)
+        host.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout = FlowLayout(host, margin=2, h_spacing=18, v_spacing=22)
         host.setLayout(layout)
         scroll.setWidget(host)
         return scroll, layout
@@ -4719,8 +4952,10 @@ class LibraryPage(QWidget):
     def _make_list_view(self) -> tuple[QScrollArea, QVBoxLayout]:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         style_scroll_area(scroll)
         host = QWidget()
+        host.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout = QVBoxLayout(host)
         layout.setContentsMargins(2, 2, 8, 8)
         layout.setSpacing(8)
@@ -4728,7 +4963,14 @@ class LibraryPage(QWidget):
         scroll.setWidget(host)
         return scroll, layout
 
-    # ------------------------------------------------------------- filtering
+    def _current_scroll(self) -> QScrollArea | None:
+        if self._view_mode == "grid":
+            return self.grid_scroll
+        if self._view_mode == "list":
+            return self.list_scroll
+        return None
+
+    # --------------------------------------------------------------- views
     def set_filter(self, text: str) -> None:
         text = (text or "").strip()
         if text == self._filter:
@@ -4739,17 +4981,12 @@ class LibraryPage(QWidget):
     def filter_text(self) -> str:
         return self._filter
 
-    def _source_selected(self) -> None:
-        self._source_filter = self.source_combo.currentData()
-        self.reload()
-
-    def _sort_selected(self) -> None:
-        self.reload()
-
-    # ---------------------------------------------------------------- views
     def set_view(self, mode: str) -> None:
         if mode not in self.VIEWS:
             return
+        previous = self._current_scroll()
+        if previous is not None:
+            self._scroll_positions[self._view_mode] = previous.verticalScrollBar().value()
         self._view_mode = mode
         self.db.set_setting("library_view", mode)
         button = self.view_buttons.get(mode)
@@ -4759,6 +4996,11 @@ class LibraryPage(QWidget):
         if mode in self._dirty_views:
             self._rebuild_view(mode)
             self._dirty_views.discard(mode)
+        scroll = self._current_scroll()
+        if scroll is not None:
+            value = self._scroll_positions.get(mode, 0)
+            QTimer.singleShot(0, lambda: scroll.verticalScrollBar().setValue(value))
+        self._rebuild_recent()
         if mode == "minimal":
             self.toast.emit(
                 tr("Widok minimalny: gry uruchomisz też z menu traya.")
@@ -4782,7 +5024,7 @@ class LibraryPage(QWidget):
             self._cover_cache[key] = None if pixmap.isNull() else pixmap
         return self._cover_cache[key]
 
-    # ---------------------------------------------------------------- reload
+    # -------------------------------------------------------------- reload
     def reload(self) -> None:
         games = self.db.list_games(self._filter)
         if self._source_filter == "steam":
@@ -4791,21 +5033,25 @@ class LibraryPage(QWidget):
             games = [game for game in games if not game.get("is_steam")]
         for game in games:
             game["_bits"] = exe_bits(str(game.get("exe_path", "")))
-        sort_key = self.sort_combo.currentData()
-        if sort_key == "fps":
+        if self._sort_mode == "recent":
+            games.sort(key=lambda game: str(game.get("last_played", "")), reverse=True)
+        elif self._sort_mode == "fps":
             games.sort(key=lambda game: int(game.get("fps_limit", 0) or 0), reverse=True)
-        elif sort_key == "scaling":
+        elif self._sort_mode == "scaling":
             games.sort(key=lambda game: str(game.get("scaling_mode", "")))
         self._games = games
 
         stats = self.db.stats()
-        self.stats_label.setText(
-            tr(
-                "{games} gier  ·  {stores} w sklepach",
-                games=stats["games"],
-                stores=stats.get("stores", 0),
+        if self._filter:
+            self.stats_label.setText(tr("{count} wyników", count=len(games)))
+        else:
+            self.stats_label.setText(
+                tr(
+                    "{games} gier  ·  {stores} w sklepach",
+                    games=stats["games"],
+                    stores=stats.get("stores", 0),
+                )
             )
-        )
         ids = {int(game["id"]) for game in self._games}
         if self._selected_id not in ids:
             self._selected_id = int(self._games[0]["id"]) if self._games else 0
@@ -4813,38 +5059,60 @@ class LibraryPage(QWidget):
         self._dirty_views = set(self.VIEWS)
         self._rebuild_view(self._view_mode)
         self._dirty_views.discard(self._view_mode)
+        self._rebuild_recent()
 
     def _sync_hero(self) -> None:
         game = next(
-            (
-                item
-                for item in self._games
-                if int(item["id"]) == self._selected_id
-            ),
+            (item for item in self._games if int(item["id"]) == self._selected_id),
             None,
         )
         self.hero.set_game(game, self._cover_for(game) if game else None)
 
     def _select_game(self, game_id: int) -> None:
-        if game_id == self._selected_id:
+        if game_id != self._selected_id:
+            self._selected_id = game_id
+            self._sync_hero()
+            for ident, widget in self._cards.items():
+                setter = getattr(widget, "set_selected", None)
+                if setter is not None:
+                    setter(ident == game_id)
+            for ident, tile in self._recent_tiles.items():
+                tile.set_selected(ident == game_id)
+        self.setFocus()
+
+    def _rebuild_recent(self) -> None:
+        self._clear_layout(self.recent_row)
+        self._recent_tiles.clear()
+        unfiltered = not self._filter and self._source_filter is None
+        recent = self.db.recent_games(self.RECENT_LIMIT) if unfiltered else []
+        known = {int(game["id"]) for game in self._games}
+        recent = [game for game in recent if int(game["id"]) in known]
+        if not recent:
+            self.recent_section.hide()
             return
-        self._selected_id = game_id
-        self._sync_hero()
-        for ident, widget in self._cards.items():
-            setter = getattr(widget, "set_selected", None)
-            if setter is not None:
-                setter(ident == game_id)
+        for game in recent:
+            game_id = int(game["id"])
+            tile = RecentTile(game, self._cover_for(game))
+            tile.selected.connect(self._select_game)
+            tile.launch_requested.connect(self.launch_requested.emit)
+            tile.set_selected(game_id == self._selected_id)
+            self._recent_tiles[game_id] = tile
+            self.recent_row.addWidget(tile)
+        self.recent_row.addStretch(1)
+        self.recent_section.show()
 
     def free_resources(self) -> None:
         """Drop cover pixmaps and card widgets while the game is running."""
         self.grid_layout.clear()
         self._clear_layout(self.list_layout)
+        self._clear_layout(self.recent_row)
+        self._recent_tiles.clear()
         self.minimal_tree.clear()
         self._cards.clear()
         self._cover_cache.clear()
         self._dirty_views = set(self.VIEWS)
 
-    def _clear_layout(self, layout: QVBoxLayout) -> None:
+    def _clear_layout(self, layout) -> None:
         while layout.count():
             item = layout.takeAt(0)
             if item is None:
@@ -4855,36 +5123,50 @@ class LibraryPage(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
-    def _empty_widget(self, text: str, hint_text: str = "") -> QWidget:
+    def _empty_widget(self, text: str, hint: str = "", cta: bool = False) -> QWidget:
         frame = QFrame()
         frame.setObjectName("Panel")
-        frame.setMinimumHeight(200)
+        frame.setMinimumHeight(220)
         frame.setMinimumWidth(420)
         layout = QVBoxLayout(frame)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         title = QLabel(text)
         title.setObjectName("EmptyTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
-        hint = QLabel(
-            hint_text
-            or tr("Użyj „Dodaj grę” lub zsynchronizuj bibliotekę Steam.")
-        )
-        hint.setObjectName("EmptyHint")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(hint)
+        hint_label = QLabel(hint or tr("Użyj „Dodaj grę” lub zsynchronizuj bibliotekę Steam."))
+        hint_label.setObjectName("EmptyHint")
+        hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint_label)
+        if cta:
+            button = QPushButton(tr("Dodaj grę"))
+            button.setObjectName("PrimaryButton")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_button_icon(button, "plus", get_theme().on_accent, 16)
+            button.clicked.connect(self.add_requested.emit)
+            layout.addSpacing(6)
+            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
         return frame
+
+    def _empty_state(self) -> QWidget:
+        if self.db.stats()["games"] == 0:
+            return self._empty_widget(
+                tr("Brak gier."), tr("Dodaj pierwszą grę, aby zacząć."), cta=True
+            )
+        return self._empty_widget(
+            tr("Nie znaleziono gier"),
+            tr("Zmień filtr lub dodaj nową grę."),
+        )
 
     def _rebuild_view(self, mode: str) -> None:
         self._cards.clear()
+        scroll = self._current_scroll()
+        restore = scroll.verticalScrollBar().value() if scroll is not None else 0
         if mode == "grid":
             self.grid_layout.clear()
             if not self._games:
-                self.grid_layout.addWidget(
-                    self._empty_widget(tr("Nie znaleziono gier"), tr("Zmień filtr lub dodaj nową grę."))
-                )
-                return
+                self.grid_layout.addWidget(self._empty_state())
             for game in self._games:
                 card = GameCard(game, self._cover_for(game))
                 card.launch_requested.connect(self.launch_requested.emit)
@@ -4898,11 +5180,8 @@ class LibraryPage(QWidget):
         elif mode == "list":
             self._clear_layout(self.list_layout)
             if not self._games:
-                self.list_layout.addWidget(
-                    self._empty_widget(tr("Nie znaleziono gier"), tr("Zmień filtr lub dodaj nową grę."))
-                )
+                self.list_layout.addWidget(self._empty_state())
                 self.list_layout.addStretch(1)
-                return
             for game in self._games:
                 row = CompactGameRow(game, self._cover_for(game))
                 row.launch_requested.connect(self.launch_requested.emit)
@@ -4913,7 +5192,8 @@ class LibraryPage(QWidget):
                 row.set_selected(int(game["id"]) == self._selected_id)
                 self._cards[int(game["id"])] = row
                 self.list_layout.addWidget(row)
-            self.list_layout.addStretch(1)
+            if self._games:
+                self.list_layout.addStretch(1)
         else:
             self.minimal_tree.clear()
             if not self._games:
@@ -4942,6 +5222,9 @@ class LibraryPage(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, int(game["id"]))
                 item.setToolTip(0, str(game.get("exe_path", "")))
                 self.minimal_tree.addTopLevelItem(item)
+            return
+        if scroll is not None:
+            QTimer.singleShot(0, lambda: scroll.verticalScrollBar().setValue(restore))
 
     def _minimal_launch(self, item: QTreeWidgetItem, _column: int = 0) -> None:
         game_id = item.data(0, Qt.ItemDataRole.UserRole)
@@ -4957,6 +5240,53 @@ class LibraryPage(QWidget):
             self.context_requested.emit(
                 int(game_id), self.minimal_tree.viewport().mapToGlobal(position)
             )
+
+    # ----------------------------------------------------------- keyboard
+    def _grid_columns(self) -> int:
+        width = max(1, self.grid_scroll.viewport().width() - 6)
+        return max(1, width // (GameCard.CARD_WIDTH + 18))
+
+    def _move_selection(self, dx: int, dy: int) -> None:
+        ids = [int(game["id"]) for game in self._games]
+        if not ids:
+            return
+        columns = self._grid_columns() if self._view_mode == "grid" else 1
+        index = ids.index(self._selected_id) if self._selected_id in ids else 0
+        target = max(0, min(len(ids) - 1, index + dx + dy * columns))
+        self._select_game(ids[target])
+        widget = self._cards.get(ids[target])
+        scroll = self._current_scroll()
+        if widget is not None and scroll is not None:
+            scroll.ensureWidgetVisible(widget, 0, 60)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QComboBox)):
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if self._view_mode in {"grid", "list"} and self._games:
+            if key == Qt.Key.Key_Left:
+                self._move_selection(-1, 0)
+                return
+            if key == Qt.Key.Key_Right:
+                self._move_selection(1, 0)
+                return
+            if key == Qt.Key.Key_Up:
+                self._move_selection(0, -1)
+                return
+            if key == Qt.Key.Key_Down:
+                self._move_selection(0, 1)
+                return
+            if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                self.launch_requested.emit(self._selected_id)
+                return
+            if key == Qt.Key.Key_E:
+                self.edit_requested.emit(self._selected_id)
+                return
+            if key == Qt.Key.Key_Delete:
+                self.delete_requested.emit(self._selected_id)
+                return
+        super().keyPressEvent(event)
 
     def set_sync_busy(self, busy: bool) -> None:
         self.sync_button.setEnabled(not busy)
@@ -6329,6 +6659,82 @@ def write_runtime_file(
     return runtime_path
 
 
+class ToastPill(QFrame):
+    """Floating notification pill that fades in above the status bar."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("ToastPill")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 20, 10)
+        layout.setSpacing(10)
+        self.icon_label = QLabel()
+        self.icon_label.setObjectName("ToastIcon")
+        self.icon_label.setFixedSize(18, 18)
+        layout.addWidget(self.icon_label)
+        self.message = QLabel("")
+        self.message.setObjectName("ToastText")
+        layout.addWidget(self.message)
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._effect)
+        self._fade = QPropertyAnimation(self._effect, b"opacity", self)
+        self._fade.setDuration(170)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(3200)
+        self._hide_timer.timeout.connect(self._fade_out)
+        self._visible = False
+        self.refresh_icon()
+        self.hide()
+
+    def refresh_icon(self) -> None:
+        color = get_theme().accent
+        self.icon_label.setPixmap(ui_icon("check", color, 16).pixmap(16, 16))
+
+    def _fade_to(self, start: float, end: float, then=None) -> None:
+        self._fade.stop()
+        try:
+            self._fade.finished.disconnect()
+        except TypeError:
+            pass
+        self._fade.setStartValue(start)
+        self._fade.setEndValue(end)
+        if then is not None:
+            self._fade.finished.connect(then)
+        self._fade.start()
+
+    def show_message(self, text: str) -> None:
+        self.message.setText(text)
+        self.message.adjustSize()
+        self.adjustSize()
+        self.reposition()
+        self._visible = True
+        self.show()
+        self.raise_()
+        self._fade_to(self._effect.opacity(), 1.0)
+        self._hide_timer.start()
+
+    def _fade_out(self) -> None:
+        if not self._visible:
+            return
+        self._visible = False
+        self._fade_to(self._effect.opacity(), 0.0, self.hide)
+
+    def reposition(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        height = self.sizeHint().height() or self.height()
+        width = self.sizeHint().width() or self.width()
+        x = max(16, (parent.width() - width) // 2)
+        y = max(16, parent.height() - 28 - height - 18)
+        self.setGeometry(x, y, width, height)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, database: Database) -> None:
         super().__init__()
@@ -6514,6 +6920,7 @@ class MainWindow(QMainWindow):
         grip = QSizeGrip(status_bar)
         status_layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom)
         root_layout.addWidget(status_bar)
+        self.toast_pill = ToastPill(self)
         self._sync_topbar_search()
 
     def _search_changed(self, text: str) -> None:
@@ -6571,11 +6978,30 @@ class MainWindow(QMainWindow):
             self.topbar.set_search_placeholder(tr("Szukaj..."))
             self.topbar.set_search_text("")
 
+    def _fade_in_page(self, widget: QWidget | None) -> None:
+        if widget is None:
+            return
+        previous = getattr(self, "_page_fade", None)
+        if previous is not None:
+            previous.stop()
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(0.25)
+        widget.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", widget)
+        animation.setDuration(150)
+        animation.setStartValue(0.25)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.finished.connect(lambda: widget.setGraphicsEffect(None))
+        self._page_fade = animation
+        animation.start()
+
     def _switch_page(self, index: int) -> None:
         if 0 <= index < self.stack.count():
             if hasattr(self, "_search_timer"):
                 self._search_timer.stop()
             self.stack.setCurrentIndex(index)
+            self._fade_in_page(self.stack.currentWidget())
             self._sync_topbar_search()
 
 
@@ -6651,6 +7077,7 @@ class MainWindow(QMainWindow):
         self.library_page.set_view("minimal")
         self.nav_rail.set_current(0)
         self.stack.setCurrentIndex(0)
+        self._fade_in_page(self.stack.currentWidget())
         self._sync_topbar_search()
         self.show_window()
 
@@ -6782,6 +7209,7 @@ class MainWindow(QMainWindow):
     def _open_settings_page(self) -> None:
         self.nav_rail.set_current(2)
         self.stack.setCurrentIndex(2)
+        self._fade_in_page(self.stack.currentWidget())
         self._sync_topbar_search()
         self.show_window()
 
@@ -6877,6 +7305,11 @@ class MainWindow(QMainWindow):
     def shutdown_hotkey(self) -> None:
         self._hotkey.stop()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "toast_pill"):
+            self.toast_pill.reposition()
+
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
@@ -6906,6 +7339,8 @@ class MainWindow(QMainWindow):
         self._toast_generation += 1
         generation = self._toast_generation
         self.status_label.setText(message)
+        if hasattr(self, "toast_pill"):
+            self.toast_pill.show_message(message)
         QTimer.singleShot(
             4500,
             lambda: self.status_label.setText(tr("Gotowy"))
@@ -7042,6 +7477,8 @@ class MainWindow(QMainWindow):
         self.topbar.refresh_icons()
         self.nav_rail.refresh_icons()
         self.library_page.refresh_icons()
+        if hasattr(self, "toast_pill"):
+            self.toast_pill.refresh_icon()
         self.steam_page.refresh_icons()
         self.settings_page._refresh_deps()
         log.info("Theme applied: %s", theme.name)
@@ -9227,6 +9664,7 @@ class MainWindow(QMainWindow):
         if not game:
             self.toast(tr("Nie znaleziono gry w bibliotece."))
             return
+        self.db.touch_last_played(int(game_id))
         game = self._ensure_game_prefix(game)
         if not self._maybe_prepare_winetricks(game):
             return

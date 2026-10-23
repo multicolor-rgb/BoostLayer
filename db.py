@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -457,6 +458,7 @@ class Database:
             "amazon_id": "TEXT NOT NULL DEFAULT ''",
             "store": "TEXT NOT NULL DEFAULT ''",
             "store_id": "TEXT NOT NULL DEFAULT ''",
+            "last_played": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -623,6 +625,7 @@ class Database:
         data["winetricks_verbs"] = str(data.get("winetricks_verbs") or "")
         data["winetricks_auto"] = int(bool(data.get("winetricks_auto", 0)))
         data["winetricks_state"] = str(data.get("winetricks_state") or "")
+        data["last_played"] = str(data.get("last_played") or "")
         return data
 
     def list_games(self, search: str = "") -> list[dict[str, Any]]:
@@ -638,6 +641,24 @@ class Database:
                 rows = self._conn.execute(
                     "SELECT * FROM library ORDER BY name COLLATE NOCASE"
                 ).fetchall()
+        return [self._clean_row(row) for row in rows]
+
+    def touch_last_played(self, game_id: int) -> None:
+        """Remember the moment a library entry was launched."""
+        stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE library SET last_played = ? WHERE id = ?",
+                (stamp, int(game_id)),
+            )
+
+    def recent_games(self, limit: int = 6) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM library WHERE last_played != '' "
+                "ORDER BY last_played DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
         return [self._clean_row(row) for row in rows]
 
     def get_game(self, game_id: int) -> dict[str, Any] | None:
