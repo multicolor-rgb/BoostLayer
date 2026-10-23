@@ -4,12 +4,12 @@ Boostlayer does not talk to Amazon APIs directly.  ``nile`` handles OAuth
 device registration, the entitlement library, downloads and manifests; this
 module only wraps it, parses its JSON output and exposes Qt workers for the UI.
 
-The integration deliberately mirrors Heroic's approach:
+The integration deliberately mirrors the nile CLI approach:
 
 * ``nile`` is downloaded from GitHub Releases into the app config directory and
   can be overridden with an explicit path.
 * ``NILE_CONFIG_PATH`` points at Boostlayer's own directory so a system-wide or
-  Heroic installation is never modified.
+  The external launcher installation is never modified.
 * Launching uses ``nile launch --json <id>`` to obtain the real executable,
   arguments, working directory and Amazon SDK environment.  The game itself is
   then started through Boostlayer's normal Wine/Proton pipeline, which keeps

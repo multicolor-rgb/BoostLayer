@@ -8,10 +8,10 @@ runtime jest **PyQt6**.
 
 ## Funkcje
 
-- **Biblioteka** — nowoczesny interfejs w stylu Epic Games Store i Heroic:
+- **Biblioteka** — nowoczesny interfejs w stylu Epic Games Store:
   duży banner wybranej gry, siatka okładek z nakładką hover, widok listy oraz
   tryb minimalny (tray).
-- **Motywy** — Epic Dark, Heroic Violet i Ember; wybór w
+- **Motywy** — Epic Dark, Violet i Ember; wybór w
   Ustawieniach → Wygląd. Paleta jest neutralna, a akcent używany oszczędnie.
 - **Układ** — górny pasek z globalną wyszukiwarką i ikonową szyną nawigacji
   (zwijaną do samych ikon), spójne karty, chipy i przyciski w całej aplikacji.
@@ -72,7 +72,7 @@ runtime jest **PyQt6**.
   **ZAINSTALUJ** aplikacja pyta o dokładny katalog gry (z propozycją
   `katalog_bazowy / tytuł`, informacją o wolnym miejscu i opcją zapamiętania
   katalogu bazowego dla sklepu).
-- **Amazon Games (Prime Gaming)** — integracja przez `nile` (jak w Heroic):
+- **Amazon Games (Prime Gaming)** — integracja przez `nile`:
   logowanie konta Amazon, synchronizacja biblioteki, pobieranie z postępem
   i anulowaniem, aktualizacje, weryfikacja plików oraz odinstalowanie. `nile`
   jest pobierany z GitHub Releases do `~/.config/boostlayer/tools` (można

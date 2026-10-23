@@ -5,9 +5,9 @@ Numeracja odpowiada tagom `build-01` … `build-15`.
 
 | # | Data | Zmiana | Gałąź |
 |---|------|--------|-------|
-| 15 | 2026-10-23 | Siatka 2.0, rząd „Kontynuuj” i kinowa konsola (hero + karuzela) | `feature/epic-heroic-ui-build12` |
-| 14 | 2026-10-23 | Redesign UI w stylu Epic Games Store / Heroic + nowa ikona BL, na bazie build-12 (sklepy) | `feature/epic-heroic-ui-build12` |
-| 13 | 2026-10-23 | Redesign UI w stylu Epic Games Store / Heroic + nowa ikona BL (na bazie build-11) | `feature/epic-heroic-ui` |
+| 15 | 2026-10-23 | Siatka 2.0, rząd „Kontynuuj” i kinowa konsola (hero + karuzela) | `feature/epic-ui-build12` |
+| 14 | 2026-10-23 | Redesign UI w stylu Epic Games Store + nowa ikona BL, na bazie build-12 (sklepy) | `feature/epic-ui-build12` |
+| 13 | 2026-10-23 | Redesign UI w stylu Epic Games Store + nowa ikona BL (na bazie build-11) | `feature/epic-ui` |
 | 12 | 2026-10-22 | Integracje z wieloma sklepami, okładki i prefetch rozmiarów | `feature/store-integrations` |
 | 11 | 2026-10-21 | Pełna biblioteka Steam z synchronizacją API i instalacją w aplikacji | `feature/steam-library-api` |
 | 10 | 2026-10-21 | Menedżer Winetricks i kinowy tryb Big Picture | `feature/winetricks-big-picture` |
@@ -54,9 +54,9 @@ Numeracja odpowiada tagom `build-01` … `build-15`.
 - Ikona BL (biały monogram na czarnym tle) wszędzie.
 - Katalogi PL/EN/DE scalone z build-12; testy: 92/92 OK.
 
-## 13 — Redesign UI: Epic Games Store / Heroic (na bazie build-11)
+## 13 — Redesign UI: Epic Games Store (na bazie build-11)
 
-- Nowy design system: palety **Epic Dark**, **Heroic Violet**, **Ember**,
+- Nowy design system: palety **Epic Dark**, **Violet**, **Ember**,
   tokeny QSS (`${accent}`, `${surface}`…), ciemna paleta Qt.
 - Nowy shell: górny pasek z globalną wyszukiwarką, ikonowa szyna nawigacji
   ze zwijaniem do 64 px, dyskretny pasek statusu.

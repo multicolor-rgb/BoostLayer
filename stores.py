@@ -1,6 +1,6 @@
 """Shared storefront integration layer for Boostlayer.
 
-Adapters wrap the external CLIs used by Heroic (nile, gogdl, legendary) and
+Adapters wrap the external store CLIs (nile, gogdl, legendary) and
 normalise their libraries, installs and launch information for the UI.
 """
 from __future__ import annotations

@@ -518,7 +518,7 @@ QPushButton#HeroGhost:hover {
     background: rgba(40, 40, 44, 0.75);
     border-color: rgba(255, 255, 255, 0.55);
 }
-QPushButton#HeroIcon {
+QPushButton#HeroMenuButton {
     background: rgba(20, 20, 22, 0.55);
     border: 1px solid rgba(255, 255, 255, 0.28);
     border-radius: 8px;
@@ -527,7 +527,7 @@ QPushButton#HeroIcon {
     min-height: 38px;
     max-height: 38px;
 }
-QPushButton#HeroIcon:hover {
+QPushButton#HeroMenuButton:hover {
     background: rgba(48, 48, 54, 0.8);
     border-color: rgba(255, 255, 255, 0.55);
 }
@@ -1610,7 +1610,7 @@ class TopBar(QFrame):
 
 
 class NavRail(QFrame):
-    """Collapsible navigation rail with icon+label entries (Heroic style)."""
+    """Collapsible navigation rail with compact icon+label entries."""
 
     page_selected = pyqtSignal(int)
 
@@ -1984,7 +1984,7 @@ class HeroBanner(QFrame):
         self.edit.clicked.connect(self._emit_edit)
         actions.addWidget(self.edit)
         self.more = QPushButton()
-        self.more.setObjectName("HeroIcon")
+        self.more.setObjectName("HeroMenuButton")
         self.more.setCursor(Qt.CursorShape.PointingHandCursor)
         self.more.setToolTip(tr("Więcej"))
         set_button_icon(self.more, "dots", "#FFFFFF", 18)

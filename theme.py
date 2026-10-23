@@ -87,9 +87,9 @@ THEMES: dict[str, Theme] = {
         success_soft="rgba(74, 222, 128, 0.16)",
         warning="#F5A623",
     ),
-    "heroic": Theme(
-        key="heroic",
-        name="Heroic Violet",
+    "violet": Theme(
+        key="violet",
+        name="Violet",
         background="#0F0F13",
         background_dark="#09090C",
         surface="#17171C",
