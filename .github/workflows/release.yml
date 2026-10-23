@@ -49,16 +49,28 @@ jobs:
             TAG="${GITHUB_REF_NAME}"
           fi
           case "$TAG" in
-            v*) VERSION="${TAG#v}" ;;
-            *)  VERSION="$TAG" ;;
+            v*) NAME_VERSION="${TAG#v}" ;;
+            *)  NAME_VERSION="$TAG" ;;
           esac
-          if [ -z "$VERSION" ]; then
+          if [ -z "$NAME_VERSION" ]; then
             echo "Nie można ustalić wersji." >&2
             exit 1
+          fi
+          # Numer bazowy bez sufiksu (np. v0.1.0-beta -> 0.1.0).
+          VERSION="${NAME_VERSION%%-*}"
+          SUFFIX="${NAME_VERSION#"$VERSION"}"
+          SUFFIX="${SUFFIX#-}"
+          DISPLAY_VERSION="$VERSION"
+          PRERELEASE=false
+          if [ -n "$SUFFIX" ]; then
+            DISPLAY_VERSION="$VERSION $SUFFIX"
+            PRERELEASE=true
           fi
           printf '%s\n' "$VERSION" > VERSION
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "display_version=$DISPLAY_VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         shell: bash
@@ -146,9 +158,9 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: "Boostlayer ${{ steps.version.outputs.version }}"
+          name: "Boostlayer ${{ steps.version.outputs.display_version }}"
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.version.outputs.prerelease }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
