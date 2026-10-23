@@ -120,14 +120,12 @@ class ThemeTests(unittest.TestCase):
         finally:
             theme.set_theme(original.key)
 
-    def test_svg_contains_lightning_and_icon_files(self) -> None:
+    def test_svg_contains_white_bl_on_black(self) -> None:
         svg = Path("assets/boostlayer.svg").read_text(encoding="utf-8")
-        self.assertIn("<path", svg)
-        self.assertIn("FF335F", svg)
-        icons = Path("assets/icons")
-        if icons.is_dir():
-            for size in (16, 32, 48, 256):
-                self.assertTrue((icons / f"boostlayer-{size}.png").is_file())
+        self.assertIn(">BL</text>", svg)
+        self.assertIn('fill="#000000"', svg)
+        self.assertIn('fill="#FFFFFF"', svg)
+        self.assertNotIn("FF335F", svg)
 
 
 class GamepadTests(unittest.TestCase):

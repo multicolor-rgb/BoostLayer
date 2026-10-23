@@ -41,7 +41,6 @@ from PyQt6.QtGui import (
     QDesktopServices,
     QGuiApplication,
     QFont,
-    QFontDatabase,
     QIcon,
     QKeySequence,
     QLinearGradient,
@@ -109,6 +108,8 @@ from db import (
     scaling_label,
 )
 from theme import DEFAULT_THEME, THEMES, build_qss, get_theme, set_theme
+from ui_icons import icon as ui_icon
+from ui_icons import refresh_button_icon, set_button_icon
 from i18n import DEFAULT_LANGUAGE, LANGUAGES, get_language, set_language, tr
 from console import ConsoleWindow
 from core import (
@@ -172,477 +173,792 @@ from core import (
 )
 
 QSS = """
+/* ------------------------------------------------------------------ base */
 QWidget {
-    color: #DCEBF1;
+    color: ${text};
     background: transparent;
-    font-family: "DejaVu Sans", "Noto Sans", sans-serif;
+    font-family: "Inter", "Noto Sans", "Cantarell", "DejaVu Sans", sans-serif;
     font-size: 10pt;
     outline: none;
 }
 QWidget#Root {
-    background: #0E1013;
-    border: 1px solid #252B32;
+    background: ${bg};
+    border: 1px solid ${border};
 }
-QFrame#TitleBar {
-    background: #0A0C0E;
-    border-bottom: 1px solid #20262D;
+QLabel {
+    background: transparent;
 }
-QLabel#BrandMark {
-    color: #00E5FF;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 15pt;
+QToolTip {
+    background: ${surface_alt};
+    color: ${text};
+    border: 1px solid ${border_strong};
+    border-radius: 6px;
+    padding: 6px 9px;
+}
+
+/* --------------------------------------------------------------- top bar */
+QFrame#TopBar {
+    background: ${bg_dark};
+    border-bottom: 1px solid ${border};
+}
+QLabel#BrandName {
+    color: ${text};
+    font-size: 12pt;
     font-weight: 800;
-    letter-spacing: 2px;
+    letter-spacing: 0.2px;
 }
 QLabel#BrandSub {
-    color: #5D707C;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
-    letter-spacing: 2px;
+    color: ${dim};
+    font-size: 8pt;
 }
-QPushButton#WindowButton, QPushButton#CloseButton {
+QLineEdit#GlobalSearch {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: 9px;
+    padding: 7px 12px;
+    color: ${text};
+    font-size: 9.5pt;
+    selection-background-color: ${accent};
+    selection-color: ${on_accent};
+}
+QLineEdit#GlobalSearch:hover {
+    border-color: ${border_strong};
+}
+QLineEdit#GlobalSearch:focus {
+    background: ${surface_alt};
+    border-color: ${accent};
+}
+QPushButton#TopIconButton {
     background: transparent;
     border: 0;
-    color: #98AAB5;
-    font-size: 14pt;
-    min-width: 38px;
-    max-width: 38px;
+    border-radius: 8px;
+    min-width: 36px;
+    max-width: 36px;
+    min-height: 32px;
+    max-height: 32px;
+}
+QPushButton#TopIconButton:hover {
+    background: ${surface};
+}
+QPushButton#TopIconButton:pressed {
+    background: ${surface_alt};
+}
+QPushButton#WindowButton {
+    background: transparent;
+    border: 0;
+    border-radius: 7px;
+    min-width: 40px;
+    max-width: 40px;
     min-height: 30px;
     max-height: 30px;
 }
 QPushButton#WindowButton:hover {
-    background: #1D242B;
-    color: #FFFFFF;
+    background: ${surface};
 }
-QPushButton#CloseButton:hover {
-    background: #C4213E;
-    color: #FFFFFF;
-}
-QToolButton#TitleMenu {
+QPushButton#CloseButton {
     background: transparent;
     border: 0;
-    color: #8EA1AC;
-    font-size: 17pt;
-    min-width: 38px;
-    max-width: 38px;
+    border-radius: 7px;
+    min-width: 40px;
+    max-width: 40px;
     min-height: 30px;
+    max-height: 30px;
 }
-QToolButton#TitleMenu:hover {
-    background: #1D242B;
-    color: #00E5FF;
+QPushButton#CloseButton:hover {
+    background: ${danger};
 }
-QFrame#Sidebar {
-    background: #101317;
-    border-right: 1px solid #20262D;
+
+/* -------------------------------------------------------------- nav rail */
+QFrame#NavRail {
+    background: ${bg_dark};
+    border-right: 1px solid ${border};
+}
+QLabel#NavRailCaption {
+    color: ${dim};
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    padding: 0 10px 4px 10px;
 }
 QPushButton#NavButton {
     background: transparent;
     border: 0;
-    border-left: 3px solid transparent;
-    color: #70828D;
+    border-radius: 9px;
+    color: ${muted};
     text-align: left;
-    padding: 12px 14px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 9pt;
-    font-weight: 700;
-    letter-spacing: 1px;
+    padding: 10px 12px;
+    font-size: 10pt;
+    font-weight: 600;
 }
 QPushButton#NavButton:hover {
-    color: #DDEFF5;
-    background: #151A1F;
+    background: ${surface};
+    color: ${text};
 }
 QPushButton#NavButton:checked {
-    color: #00E5FF;
-    background: #101C21;
-    border-left: 3px solid #00E5FF;
+    background: ${accent_soft};
+    color: ${accent};
 }
-QLabel#SidebarCaption {
-    color: #485861;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
-    letter-spacing: 1px;
+QPushButton#NavButton:checked:hover {
+    background: ${accent_soft_strong};
 }
-QLabel#SidebarLive {
-    color: #42F5A7;
-    font-family: "DejaVu Sans Mono", monospace;
+QPushButton#NavRailToggle {
+    background: transparent;
+    border: 0;
+    border-radius: 8px;
+    min-height: 30px;
+    max-height: 30px;
+}
+QPushButton#NavRailToggle:hover {
+    background: ${surface};
+}
+QLabel#NavRailStatus {
+    color: ${success};
     font-size: 8pt;
+    font-weight: 600;
+    padding: 0 10px;
 }
+QLabel#NavRailVersion {
+    color: ${dim};
+    font-size: 8pt;
+    padding: 0 10px;
+}
+QFrame#NavDivider {
+    background: ${border};
+    border: 0;
+    max-height: 1px;
+    min-height: 1px;
+}
+
+/* ------------------------------------------------------------ typography */
 QLabel#PageTitle {
-    color: #F2FBFF;
-    font-size: 22pt;
+    color: ${text};
+    font-size: 21pt;
     font-weight: 800;
-    letter-spacing: 1px;
 }
 QLabel#PageKicker {
-    color: #00E5FF;
-    font-family: "DejaVu Sans Mono", monospace;
+    color: ${accent};
     font-size: 8pt;
     font-weight: 700;
-    letter-spacing: 3px;
+    letter-spacing: 1.6px;
 }
 QLabel#PageSubtitle, QLabel#Muted {
-    color: #72838E;
+    color: ${muted};
+    font-size: 9.5pt;
 }
 QLabel#SectionTitle {
-    color: #E8F7FC;
-    font-size: 12pt;
+    color: ${text};
+    font-size: 12.5pt;
     font-weight: 700;
+}
+QLabel#SectionLabel {
+    color: ${muted};
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 1px;
 }
 QLabel#StatsPill {
-    color: #9DB4C0;
-    background: #151B21;
-    border: 1px solid #263038;
-    border-radius: 11px;
-    padding: 4px 10px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
-}
-QFrame#Panel {
-    background: #14191E;
-    border: 1px solid #252D35;
+    color: ${muted};
+    background: ${surface};
+    border: 1px solid ${border};
     border-radius: 10px;
-}
-QFrame#Card {
-    background: #14191E;
-    border: 1px solid #252E36;
-    border-radius: 10px;
-}
-QFrame#Card:hover {
-    border: 1px solid #00B8CC;
-    background: #171E24;
-}
-QFrame#CompactRow {
-    background: #14191E;
-    border: 1px solid #232C34;
-    border-radius: 8px;
-}
-QFrame#CompactRow:hover {
-    border: 1px solid #00A6BA;
-}
-QLabel#CardTitle {
-    color: #EAF9FE;
-    font-size: 11pt;
-    font-weight: 700;
-}
-QLabel#CardMeta {
-    color: #71858F;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
+    padding: 5px 11px;
+    font-size: 8.5pt;
+    font-weight: 600;
 }
 QLabel#Accent {
-    color: #00E5FF;
+    color: ${accent};
 }
 QLabel#Good {
-    color: #42F5A7;
+    color: ${success};
 }
 QLabel#Warn {
-    color: #FFB347;
+    color: ${warning};
 }
 QLabel#Bad {
-    color: #FF4D6D;
+    color: ${danger};
 }
-QPushButton {
-    background: #192027;
-    color: #DDEBF1;
-    border: 1px solid #2A343D;
+QLabel#Chip {
+    color: ${muted};
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 8pt;
+    font-weight: 600;
+}
+QLabel#ChipAccent {
+    color: ${accent};
+    background: ${accent_soft};
+    border: 1px solid ${accent_soft_strong};
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 8pt;
+    font-weight: 700;
+}
+
+/* --------------------------------------------------------------- surfaces */
+QFrame#Panel {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
+}
+QFrame#Card {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: ${radius_lg};
+}
+QFrame#Card:hover {
+    background: ${surface_alt};
+    border-color: ${border};
+}
+QFrame#Card[selected="true"] {
+    border-color: ${accent};
+    background: ${surface_alt};
+}
+QFrame#CompactRow {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: ${radius};
+}
+QFrame#CompactRow:hover {
+    background: ${surface_alt};
+    border-color: ${border_strong};
+}
+QFrame#CompactRow[selected="true"] {
+    border-color: ${accent};
+}
+QFrame#DetailsPane {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
+}
+QLabel#CardTitle {
+    color: ${text};
+    font-size: 10pt;
+    font-weight: 600;
+}
+QLabel#CardMeta {
+    color: ${muted};
+    font-size: 8.5pt;
+}
+QLabel#SteamCover {
+    background: ${surface_alt};
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
+    padding: 8px;
+}
+QLabel#EmptyTitle {
+    color: ${text};
+    font-size: 14pt;
+    font-weight: 700;
+}
+QLabel#EmptyHint {
+    color: ${muted};
+    font-size: 9.5pt;
+}
+
+/* ------------------------------------------------------------------ hero */
+QFrame#HeroBanner {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: ${radius_xl};
+}
+QLabel#HeroTitle {
+    color: #FFFFFF;
+    font-size: 24pt;
+    font-weight: 800;
+}
+QLabel#HeroMeta {
+    color: #D6D6DA;
+    font-size: 9.5pt;
+    font-weight: 500;
+}
+QLabel#HeroKicker {
+    color: #FFFFFF;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QPushButton#HeroPlay {
+    background: ${accent};
+    color: ${on_accent};
+    border: 1px solid ${accent};
+    border-radius: 9px;
+    padding: 10px 22px;
+    font-size: 10pt;
+    font-weight: 700;
+}
+QPushButton#HeroPlay:hover {
+    background: ${accent_hover};
+    border-color: ${accent_hover};
+}
+QPushButton#HeroGhost {
+    background: rgba(20, 20, 22, 0.55);
+    color: #FFFFFF;
+    border: 1px solid rgba(255, 255, 255, 0.32);
+    border-radius: 9px;
+    padding: 10px 18px;
+    font-size: 9.5pt;
+    font-weight: 600;
+}
+QPushButton#HeroGhost:hover {
+    background: rgba(40, 40, 44, 0.75);
+    border-color: rgba(255, 255, 255, 0.55);
+}
+QPushButton#HeroIcon {
+    background: rgba(20, 20, 22, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 8px;
+    min-width: 38px;
+    max-width: 38px;
+    min-height: 38px;
+    max-height: 38px;
+}
+QPushButton#HeroIcon:hover {
+    background: rgba(48, 48, 54, 0.8);
+    border-color: rgba(255, 255, 255, 0.55);
+}
+
+/* --------------------------------------------------------- cover overlays */
+QWidget#CardOverlay {
+    background: rgba(8, 8, 10, 0.30);
+    border-radius: ${radius_lg};
+}
+QPushButton#OverlayPlay {
+    background: ${accent};
+    border: 1px solid ${accent};
+    border-radius: 24px;
+    min-width: 48px;
+    max-width: 48px;
+    min-height: 48px;
+    max-height: 48px;
+}
+QPushButton#OverlayPlay:hover {
+    background: ${accent_hover};
+    border-color: ${accent_hover};
+}
+QPushButton#OverlayMore {
+    background: rgba(12, 12, 14, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.25);
     border-radius: 7px;
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 30px;
+    max-height: 30px;
+}
+QPushButton#OverlayMore:hover {
+    background: rgba(40, 40, 46, 0.9);
+    border-color: rgba(255, 255, 255, 0.55);
+}
+QPushButton#CardPlay {
+    background: ${accent};
+    color: ${on_accent};
+    border: 1px solid ${accent};
+    border-radius: 7px;
+    padding: 6px 11px;
+    font-size: 8.5pt;
+    font-weight: 700;
+}
+QPushButton#CardPlay:hover {
+    background: ${accent_hover};
+    border-color: ${accent_hover};
+}
+QPushButton#CardIcon {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: 7px;
+    padding: 5px 8px;
+}
+QPushButton#CardIcon:hover {
+    background: ${surface_hover};
+    border-color: ${border_strong};
+}
+QPushButton#DangerIcon:hover {
+    background: ${danger_soft};
+    border-color: ${danger};
+}
+
+/* ---------------------------------------------------------------- buttons */
+QPushButton {
+    background: ${surface_alt};
+    color: ${text};
+    border: 1px solid ${border};
+    border-radius: ${radius};
     padding: 8px 14px;
     font-weight: 600;
 }
 QPushButton:hover {
-    background: #202A33;
-    border-color: #3A4853;
+    background: ${surface_hover};
+    border-color: ${border_strong};
 }
 QPushButton:pressed {
-    background: #11171C;
+    background: ${surface};
 }
 QPushButton:disabled {
-    color: #4A5962;
-    background: #12171B;
-    border-color: #1E262C;
+    color: ${dim};
+    background: ${surface};
+    border-color: ${border};
 }
 QPushButton#PrimaryButton {
-    background: #00C8E0;
-    color: #031014;
-    border: 1px solid #00E5FF;
-    font-weight: 800;
+    background: ${accent};
+    color: ${on_accent};
+    border: 1px solid ${accent};
+    font-weight: 700;
 }
 QPushButton#PrimaryButton:hover {
-    background: #54F0FF;
+    background: ${accent_hover};
+    border-color: ${accent_hover};
+}
+QPushButton#PrimaryButton:pressed {
+    background: ${accent_dim};
+    border-color: ${accent_dim};
 }
 QPushButton#GhostButton {
     background: transparent;
-    border: 1px solid #2C3942;
-    color: #9EB3BE;
+    border: 1px solid ${border_strong};
+    color: ${text};
 }
 QPushButton#GhostButton:hover {
-    border-color: #00C8E0;
-    color: #00E5FF;
+    background: ${surface};
+    border-color: ${accent};
 }
 QPushButton#DangerButton {
-    background: #251319;
-    color: #FF6C87;
-    border: 1px solid #54202F;
+    background: transparent;
+    color: ${danger};
+    border: 1px solid ${danger_soft};
 }
 QPushButton#DangerButton:hover {
-    background: #3A1822;
-    border-color: #C4213E;
+    background: ${danger_soft};
+    border-color: ${danger};
 }
-QPushButton#CardPlay {
-    background: #102A2F;
-    color: #00E5FF;
-    border: 1px solid #15515D;
-    border-radius: 6px;
-    padding: 6px 9px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
-    font-weight: 800;
-}
-QPushButton#CardPlay:hover {
-    background: #00E5FF;
-    color: #041014;
-}
-QPushButton#CardIcon {
+QPushButton#IconButton {
     background: transparent;
-    border: 1px solid #2A343D;
-    border-radius: 6px;
-    color: #8FA3AE;
-    padding: 5px 8px;
-    font-size: 9pt;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 5px;
 }
-QPushButton#CardIcon:hover {
-    color: #00E5FF;
-    border-color: #00A7BA;
-}
-QPushButton#DangerIcon:hover {
-    color: #FF4D6D;
-    border-color: #B92341;
+QPushButton#IconButton:hover {
+    background: ${surface};
+    border-color: ${border};
 }
 QPushButton#ViewButton {
     background: transparent;
-    color: #687B86;
-    border: 1px solid #242D35;
-    padding: 7px 11px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
+    color: ${muted};
+    border: 1px solid ${border};
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 9pt;
+    font-weight: 600;
+}
+QPushButton#ViewButton:hover {
+    color: ${text};
+    background: ${surface};
 }
 QPushButton#ViewButton:checked {
-    color: #00E5FF;
-    border-color: #008B9C;
-    background: #0D2025;
+    color: ${accent};
+    border-color: ${accent};
+    background: ${accent_soft};
 }
+QPushButton#FilterButton {
+    background: ${surface};
+    color: ${muted};
+    border: 1px solid ${border};
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 9pt;
+    font-weight: 600;
+}
+QPushButton#FilterButton:hover {
+    color: ${text};
+    border-color: ${border_strong};
+}
+
+/* ----------------------------------------------------------------- inputs */
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-    background: #0D1216;
-    border: 1px solid #27323A;
-    border-radius: 6px;
-    padding: 7px 9px;
-    color: #E5F5FA;
-    selection-background-color: #007E90;
+    background: ${bg_dark};
+    border: 1px solid ${border};
+    border-radius: ${radius};
+    padding: 7px 10px;
+    color: ${text};
+    selection-background-color: ${accent};
+    selection-color: ${on_accent};
 }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-    border: 1px solid #00B8CC;
+    border-color: ${accent};
 }
 QLineEdit#Search {
-    padding: 9px 12px;
-    background: #0B0F12;
-    border: 1px solid #232D35;
+    background: ${bg_dark};
+    border: 1px solid ${border};
+    border-radius: 9px;
+    padding: 8px 12px;
 }
 QComboBox::drop-down {
     border: 0;
     width: 26px;
 }
+QComboBox::down-arrow {
+    image: url("${icon_chevron_down}");
+    width: 14px;
+    height: 14px;
+}
+QComboBox::down-arrow:on {
+    image: url("${icon_chevron_up}");
+}
 QComboBox QAbstractItemView {
-    background: #12181D;
-    color: #DCEBF1;
-    border: 1px solid #2A3740;
-    selection-background-color: #005B68;
+    background: ${surface_alt};
+    color: ${text};
+    border: 1px solid ${border_strong};
+    border-radius: 8px;
     padding: 4px;
+    selection-background-color: ${accent};
+    selection-color: ${on_accent};
+    outline: none;
 }
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
-    width: 18px;
-    background: #182027;
+    width: 20px;
+    background: ${surface};
     border: 0;
+    border-radius: 4px;
 }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url("${icon_chevron_up}");
+    width: 10px;
+    height: 10px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url("${icon_chevron_down}");
+    width: 10px;
+    height: 10px;
+}
+
+/* ------------------------------------------------------------- indicators */
 QCheckBox {
     spacing: 9px;
-    color: #C7D9E1;
+    color: ${text};
 }
 QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border: 1px solid #34434D;
-    border-radius: 4px;
-    background: #0D1216;
+    width: 17px;
+    height: 17px;
+    border: 1px solid ${border_strong};
+    border-radius: 5px;
+    background: ${bg_dark};
 }
 QCheckBox::indicator:checked {
-    background: #00C8E0;
-    border: 1px solid #00E5FF;
+    background: ${accent};
+    border: 1px solid ${accent};
+    image: url("${icon_check}");
 }
 QCheckBox::indicator:hover {
-    border-color: #00A7BA;
+    border-color: ${accent};
 }
 QSlider::groove:horizontal {
     height: 4px;
-    background: #26323A;
+    background: ${border};
     border-radius: 2px;
 }
 QSlider::handle:horizontal {
     width: 14px;
     margin: -6px 0;
     border-radius: 7px;
-    background: #00E5FF;
+    background: ${accent};
+}
+QSlider::handle:horizontal:hover {
+    background: ${accent_hover};
 }
 QSlider::sub-page:horizontal {
-    background: #00A6BA;
+    background: ${accent_dim};
     border-radius: 2px;
 }
 QProgressBar {
-    background: #0C1115;
-    border: 1px solid #25313A;
+    background: ${bg_dark};
+    border: 1px solid ${border};
     border-radius: 7px;
     height: 14px;
     text-align: center;
-    color: #C9EAF2;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
+    color: ${text};
+    font-size: 8pt;
 }
 QProgressBar::chunk {
-    background: #00B8CC;
+    background: ${accent};
     border-radius: 6px;
 }
+
+/* -------------------------------------------------------------- scrollbars */
 QScrollArea {
     background: transparent;
     border: 0;
 }
 QScrollBar:vertical {
-    background: #0D1115;
+    background: transparent;
     width: 10px;
-    margin: 0;
+    margin: 2px;
 }
 QScrollBar::handle:vertical {
-    background: #2A3740;
-    min-height: 30px;
-    border-radius: 4px;
+    background: ${border_strong};
+    min-height: 32px;
+    border-radius: 3px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #00A7BA;
+    background: ${muted};
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
 }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    background: #0D1115;
+    background: transparent;
 }
 QAbstractScrollArea::corner {
-    background: #0D1115;
+    background: transparent;
     border: 0;
 }
 QScrollBar:horizontal {
-    background: #0D1115;
+    background: transparent;
     height: 10px;
+    margin: 2px;
 }
 QScrollBar::handle:horizontal {
-    background: #2A3740;
-    min-width: 30px;
-    border-radius: 4px;
+    background: ${border_strong};
+    min-width: 32px;
+    border-radius: 3px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: ${muted};
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
     width: 0;
 }
+
+/* ------------------------------------------------------------ tree / table */
 QTreeWidget {
-    background: #101519;
-    alternate-background-color: #12181D;
-    border: 1px solid #242D35;
-    border-radius: 8px;
-    color: #CFE1E8;
-    selection-background-color: #0B323A;
-    selection-color: #E9FCFF;
+    background: ${surface};
+    alternate-background-color: ${surface};
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
+    color: ${text};
+    selection-background-color: ${accent_soft};
+    selection-color: ${text};
     padding: 4px;
 }
 QTreeWidget::item {
-    padding: 6px;
-    border-bottom: 1px solid #1B2228;
+    padding: 7px 6px;
+    border: 0;
+    border-bottom: 1px solid ${border};
 }
 QTreeWidget::item:hover {
-    background: #182128;
+    background: ${surface_alt};
+}
+QTreeWidget::item:selected {
+    background: ${accent_soft};
+    color: ${text};
 }
 QHeaderView::section {
-    background: #0B0F12;
-    color: #6E818C;
+    background: transparent;
+    color: ${muted};
     border: 0;
-    border-bottom: 1px solid #29343C;
-    padding: 7px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
+    border-bottom: 1px solid ${border};
+    padding: 8px 7px;
+    font-size: 8.5pt;
+    font-weight: 600;
 }
+
+/* --------------------------------------------------------------- groupings */
 QGroupBox {
-    border: 1px solid #252D35;
-    border-radius: 8px;
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
     margin-top: 14px;
     padding: 16px 12px 12px 12px;
-    background: #12171B;
+    background: ${surface};
     font-weight: 700;
-    color: #BBD3DC;
+    color: ${text};
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     left: 12px;
     padding: 0 6px;
-    color: #00C8E0;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
+    color: ${muted};
+    font-size: 8.5pt;
+    font-weight: 700;
     letter-spacing: 1px;
 }
+
+/* ------------------------------------------------------------ menus/dialog */
 QMenu {
-    background: #11171C;
-    color: #D8EAF1;
-    border: 1px solid #2A3740;
+    background: ${surface_alt};
+    color: ${text};
+    border: 1px solid ${border_strong};
+    border-radius: 8px;
     padding: 6px;
 }
 QMenu::item {
-    padding: 8px 28px 8px 14px;
-    border-radius: 4px;
+    padding: 8px 28px 8px 12px;
+    border-radius: 6px;
 }
 QMenu::item:selected {
-    background: #0A3A42;
-    color: #FFFFFF;
+    background: ${accent};
+    color: ${on_accent};
 }
 QMenu::separator {
     height: 1px;
-    background: #26313A;
+    background: ${border};
     margin: 6px 8px;
 }
-QToolTip {
-    background: #0B1013;
-    color: #DDF4FA;
-    border: 1px solid #00A7BA;
-    padding: 5px;
+QMenu::icon {
+    margin-left: 6px;
 }
 QDialog {
-    background: #0E1114;
+    background: ${bg};
 }
 QDialogButtonBox QPushButton {
     min-width: 100px;
 }
+
+/* ----------------------------------------------------------------- tabs */
+QTabWidget::pane {
+    border: 0;
+    background: transparent;
+    top: 0;
+}
+QTabBar::tab {
+    background: transparent;
+    color: ${muted};
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 10px 16px;
+    margin-right: 4px;
+    font-size: 10pt;
+    font-weight: 600;
+}
+QTabBar::tab:hover {
+    color: ${text};
+}
+QTabBar::tab:selected {
+    color: ${accent};
+    border-bottom: 2px solid ${accent};
+}
+
+/* ------------------------------------------------------------ status / misc */
 QFrame#StatusBar {
-    background: #0A0D10;
-    border-top: 1px solid #1F262D;
+    background: ${bg_dark};
+    border-top: 1px solid ${border};
 }
 QLabel#StatusText {
-    color: #70838E;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 8pt;
+    color: ${muted};
+    font-size: 8.5pt;
 }
 QLabel#GhostBadge {
-    color: #42F5A7;
-    background: #0C2119;
-    border: 1px solid #1E4D3A;
+    color: ${muted};
+    background: ${surface};
+    border: 1px solid ${border};
     border-radius: 9px;
     padding: 3px 9px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
+    font-size: 8pt;
+    font-weight: 600;
 }
 QSizeGrip {
     background: transparent;
@@ -654,25 +970,26 @@ QSizeGrip {
 
 TRAY_QSS = """
 QMenu#TrayMenu {
-    background: #101418;
-    color: #DCEBF1;
-    border: 1px solid #2A343D;
+    background: ${surface_alt};
+    color: ${text};
+    border: 1px solid ${border_strong};
+    border-radius: 10px;
     padding: 7px;
 }
 QMenu#TrayMenu::item {
     padding: 8px 26px 8px 12px;
-    border-radius: 5px;
+    border-radius: 6px;
 }
 QMenu#TrayMenu::item:selected {
-    background: #17313A;
-    color: #FFFFFF;
+    background: ${accent};
+    color: ${on_accent};
 }
 QMenu#TrayMenu::item:disabled {
-    color: #7B8D98;
+    color: ${dim};
 }
 QMenu#TrayMenu::separator {
     height: 1px;
-    background: #26323A;
+    background: ${border};
     margin: 6px 9px;
 }
 QMenu#TrayMenu::icon {
@@ -892,8 +1209,37 @@ class FlowLayout(QLayout):
         return y + line_height - rect.y() + margins.bottom()
 
 
-def style_scroll_area(scroll: QScrollArea, color: str = "#0E1013") -> None:
+def apply_app_palette() -> None:
+    """Keep native-drawn bits (arrows, dialogs) readable on the dark theme."""
+    app = QApplication.instance()
+    if app is None:
+        return
+    theme = get_theme()
+    palette = QPalette()
+    mapping = {
+        QPalette.ColorRole.Window: theme.background,
+        QPalette.ColorRole.WindowText: theme.text,
+        QPalette.ColorRole.Base: theme.surface,
+        QPalette.ColorRole.AlternateBase: theme.surface_alt,
+        QPalette.ColorRole.Text: theme.text,
+        QPalette.ColorRole.Button: theme.surface_alt,
+        QPalette.ColorRole.ButtonText: theme.text,
+        QPalette.ColorRole.BrightText: "#FFFFFF",
+        QPalette.ColorRole.Highlight: theme.accent,
+        QPalette.ColorRole.HighlightedText: theme.on_accent,
+        QPalette.ColorRole.ToolTipBase: theme.surface_alt,
+        QPalette.ColorRole.ToolTipText: theme.text,
+        QPalette.ColorRole.PlaceholderText: theme.muted,
+        QPalette.ColorRole.Link: theme.accent,
+    }
+    for role, color in mapping.items():
+        palette.setColor(role, QColor(color))
+    app.setPalette(palette)
+
+
+def style_scroll_area(scroll: QScrollArea, color: str | None = None) -> None:
     """Force a dark viewport; Fusion's default viewport is light and ignores QSS."""
+    color = color or get_theme().background
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     viewport = scroll.viewport()
     viewport.setObjectName("BoostlayerViewport")
@@ -931,7 +1277,7 @@ class CoverView(QWidget):
         self.source = (source or "").strip().upper()
         self._hover = False
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
-        self.setMinimumSize(64, 84)
+        self.setMinimumSize(32, 42)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def sizeHint(self) -> QSize:
@@ -956,7 +1302,7 @@ class CoverView(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
         path = QPainterPath()
-        path.addRoundedRect(rect, 8, 8)
+        path.addRoundedRect(rect, 12, 12)
         painter.save()
         painter.setClipPath(path)
         if self.pixmap is not None and not self.pixmap.isNull():
@@ -975,104 +1321,166 @@ class CoverView(QWidget):
         else:
             theme = get_theme()
             gradient = QLinearGradient(0, 0, self.width(), self.height())
-            gradient.setColorAt(0.0, QColor(theme.panel))
-            gradient.setColorAt(0.55, QColor(theme.panel_alt))
-            gradient.setColorAt(1.0, QColor(theme.background))
+            gradient.setColorAt(0.0, QColor(theme.surface_alt))
+            gradient.setColorAt(0.55, QColor(theme.surface))
+            gradient.setColorAt(1.0, QColor(theme.background_dark))
             painter.fillRect(self.rect(), gradient)
-            grid_color = QColor(theme.accent)
-            grid_color.setAlpha(36)
-            painter.setPen(grid_color)
-            step = 28
-            for x in range(0, self.width() + step, step):
-                painter.drawLine(x, 0, x, self.height())
-            for y in range(0, self.height() + step, step):
-                painter.drawLine(0, y, self.width(), y)
             initials = "".join(
                 part[0] for part in re.split(r"\W+", self.title) if part
             )[:2].upper() or "B"
-            font = QFont("DejaVu Sans", max(24, min(54, self.width() // 4)))
+            font = QFont("DejaVu Sans", max(20, min(44, self.width() // 4)))
             font.setWeight(QFont.Weight.Black)
             painter.setFont(font)
-            painter.setPen(QColor(theme.accent))
+            initial_color = QColor(theme.accent)
+            initial_color.setAlpha(120)
+            painter.setPen(initial_color)
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, initials)
 
-        overlay = QLinearGradient(0, self.height() * 0.45, 0, self.height())
+        overlay = QLinearGradient(0, self.height() * 0.6, 0, self.height())
         overlay.setColorAt(0.0, QColor(0, 0, 0, 0))
-        overlay.setColorAt(1.0, QColor(3, 8, 11, 210))
+        overlay.setColorAt(1.0, QColor(0, 0, 0, 130))
         painter.fillRect(self.rect(), overlay)
         if self.source:
-            theme = get_theme()
-            badge_color = QColor(theme.accent)
-            badge_color.setAlpha(130)
-            painter.setPen(QColor(theme.text))
-            badge = QRectF(10, 10, 65, 21)
-            painter.setBrush(QColor(4, 13, 17, 200))
-            painter.setPen(QPen(badge_color, 1))
+            badge = QRectF(10, 10, 74, 20)
+            painter.setBrush(QColor(0, 0, 0, 150))
+            painter.setPen(QPen(QColor(255, 255, 255, 60), 1))
             painter.drawRoundedRect(badge, 5, 5)
-            painter.setFont(QFont("DejaVu Sans Mono", 7, QFont.Weight.Bold))
+            painter.setFont(QFont("DejaVu Sans", 7, QFont.Weight.DemiBold))
+            painter.setPen(QColor(255, 255, 255, 225))
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, self.source)
         painter.restore()
 
         theme = get_theme()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(
-            QPen(QColor(theme.accent) if self._hover else QColor(theme.border), 1.4)
-        )
-        painter.drawRoundedRect(rect, 8, 8)
+        if self._hover:
+            painter.setPen(QPen(QColor(theme.accent), 1.6))
+        else:
+            painter.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        painter.drawRoundedRect(rect, 12, 12)
         painter.end()
 
 
-class TitleBar(QFrame):
+class TopBar(QFrame):
+    """Application bar: brand, global search, quick actions and window controls."""
+
     menu_requested = pyqtSignal()
+    search_changed = pyqtSignal(str)
+    refresh_requested = pyqtSignal()
+    console_requested = pyqtSignal()
 
     def __init__(self, window: QWidget) -> None:
         super().__init__(window)
         self._window = window
         self._drag_offset: QPoint | None = None
-        self.setObjectName("TitleBar")
-        self.setFixedHeight(54)
+        self.setObjectName("TopBar")
+        self.setFixedHeight(64)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 8, 8, 8)
+        layout.setContentsMargins(16, 10, 10, 10)
         layout.setSpacing(10)
 
-        mark = QLabel(tr("BL"))
-        mark.setObjectName("BrandMark")
+        mark = QLabel()
+        mark.setPixmap(app_icon(30).pixmap(30, 30))
+        mark.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(mark)
-        labels = QVBoxLayout()
-        labels.setSpacing(0)
-        title = QLabel(tr("BOOSTLAYER"))
-        title.setStyleSheet("font-weight:800; color:#E9FAFF; font-size:9pt; letter-spacing:2px;")
-        subtitle = QLabel(tr("GAME RUNTIME CONTROL // {version}", version=APP_VERSION))
+
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
+        name = QLabel(tr("Boostlayer"))
+        name.setObjectName("BrandName")
+        name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        subtitle = QLabel(tr("Wine / Proton launcher"))
         subtitle.setObjectName("BrandSub")
-        labels.addWidget(title)
-        labels.addWidget(subtitle)
-        layout.addLayout(labels)
+        subtitle.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        brand.addWidget(name)
+        brand.addWidget(subtitle)
+        layout.addLayout(brand)
         layout.addStretch(1)
 
-        menu_button = QToolButton()
-        menu_button.setObjectName("TitleMenu")
-        menu_button.setText(tr("⋮"))
-        menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        menu_button.clicked.connect(self.menu_requested.emit)
-        layout.addWidget(menu_button)
+        self.search = QLineEdit()
+        self.search.setObjectName("GlobalSearch")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(300)
+        self.search.setMaximumWidth(480)
+        self.search.setPlaceholderText(tr("Szukaj gry..."))
+        self._search_action = self.search.addAction(
+            ui_icon("search", get_theme().muted, 16),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
+        self.search.textChanged.connect(self.search_changed.emit)
+        layout.addWidget(self.search, 0)
+        layout.addStretch(1)
 
-        minimize = QPushButton(tr("—"))
-        minimize.setObjectName("WindowButton")
-        minimize.setToolTip(tr("Minimalizuj"))
-        minimize.clicked.connect(window.showMinimized)
-        layout.addWidget(minimize)
+        self.refresh_button = self._action_button(
+            "refresh", tr("Odśwież bibliotekę"), self.refresh_requested.emit
+        )
+        self.console_button = self._action_button(
+            "controller", tr("Tryb konsolowy (Big Picture)"), self.console_requested.emit
+        )
+        self.menu_button = self._action_button(
+            "dots", tr("Menu aplikacji"), self.menu_requested.emit
+        )
+        for button in (self.refresh_button, self.console_button, self.menu_button):
+            layout.addWidget(button)
 
-        maximize = QPushButton(tr("□"))
-        maximize.setObjectName("WindowButton")
-        maximize.setToolTip(tr("Maksymalizuj"))
-        maximize.clicked.connect(self._toggle_maximize)
-        layout.addWidget(maximize)
+        layout.addSpacing(6)
 
-        close = QPushButton(tr("×"))
-        close.setObjectName("CloseButton")
-        close.setToolTip(tr("Zamknij"))
-        close.clicked.connect(window.close)
-        layout.addWidget(close)
+        self.minimize_button = QPushButton()
+        self.minimize_button.setObjectName("WindowButton")
+        self.minimize_button.setToolTip(tr("Minimalizuj"))
+        set_button_icon(self.minimize_button, "minus", get_theme().muted, 14)
+        self.minimize_button.clicked.connect(window.showMinimized)
+        layout.addWidget(self.minimize_button)
+
+        self.maximize_button = QPushButton()
+        self.maximize_button.setObjectName("WindowButton")
+        self.maximize_button.setToolTip(tr("Maksymalizuj"))
+        set_button_icon(self.maximize_button, "square", get_theme().muted, 14)
+        self.maximize_button.clicked.connect(self._toggle_maximize)
+        layout.addWidget(self.maximize_button)
+
+        self.close_button = QPushButton()
+        self.close_button.setObjectName("CloseButton")
+        self.close_button.setToolTip(tr("Zamknij"))
+        set_button_icon(self.close_button, "x", get_theme().muted, 15)
+        self.close_button.clicked.connect(window.close)
+        layout.addWidget(self.close_button)
+
+    def _action_button(self, name: str, tooltip: str, slot) -> QPushButton:
+        button = QPushButton()
+        button.setObjectName("TopIconButton")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(tooltip)
+        set_button_icon(button, name, get_theme().muted, 18)
+        button.clicked.connect(slot)
+        return button
+
+    def refresh_icons(self) -> None:
+        theme = get_theme()
+        for button in (
+            self.refresh_button,
+            self.console_button,
+            self.menu_button,
+        ):
+            refresh_button_icon(button, theme.muted)
+        for button in (
+            self.minimize_button,
+            self.maximize_button,
+            self.close_button,
+        ):
+            refresh_button_icon(button, theme.muted)
+        self._search_action.setIcon(ui_icon("search", theme.muted, 16))
+
+    def set_search_placeholder(self, text: str) -> None:
+        self.search.setPlaceholderText(text)
+
+    def set_search_text(self, text: str) -> None:
+        self.search.blockSignals(True)
+        self.search.setText(text)
+        self.search.blockSignals(False)
+
+    def focus_search(self) -> None:
+        self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search.selectAll()
 
     def _toggle_maximize(self) -> None:
         if self._window.isMaximized():
@@ -1115,13 +1523,136 @@ class TitleBar(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
+class NavRail(QFrame):
+    """Collapsible navigation rail with icon+label entries (Heroic style)."""
+
+    page_selected = pyqtSignal(int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("NavRail")
+        self.setFixedWidth(212)
+        self._collapsed = False
+        self._running = False
+        self._labels = [
+            tr("Biblioteka"),
+            tr("Sklepy"),
+            tr("Ustawienia"),
+            tr("Runnery"),
+            tr("MangoHud"),
+        ]
+        self._icon_names = ["library", "store", "sliders", "download", "gauge"]
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 18, 12, 14)
+        layout.setSpacing(4)
+        self.caption = QLabel(tr("NAWIGACJA"))
+        self.caption.setObjectName("NavRailCaption")
+        layout.addWidget(self.caption)
+        layout.addSpacing(4)
+
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons: list[QPushButton] = []
+        for index, (label, icon_name) in enumerate(
+            zip(self._labels, self._icon_names)
+        ):
+            button = QPushButton(label)
+            button.setObjectName("NavButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_button_icon(button, icon_name, get_theme().muted, 18)
+            button.toggled.connect(partial(self._sync_icon, button))
+            self.group.addButton(button, index)
+            self.buttons.append(button)
+            layout.addWidget(button)
+        self.buttons[0].setChecked(True)
+        self.group.idClicked.connect(self.page_selected.emit)
+
+        layout.addStretch(1)
+        divider = QFrame()
+        divider.setObjectName("NavDivider")
+        layout.addWidget(divider)
+        layout.addSpacing(8)
+        self.status = QLabel("●  " + tr("Gotowy"))
+        self.status.setObjectName("NavRailStatus")
+        self.version = QLabel(f"v{APP_VERSION}")
+        self.version.setObjectName("NavRailVersion")
+        layout.addWidget(self.status)
+        layout.addWidget(self.version)
+        layout.addSpacing(2)
+
+        self.toggle = QPushButton()
+        self.toggle.setObjectName("NavRailToggle")
+        self.toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle.setToolTip(tr("Zwiń nawigację"))
+        set_button_icon(self.toggle, "chevron-left", get_theme().muted, 16)
+        self.toggle.clicked.connect(self.toggle_collapsed)
+        layout.addWidget(self.toggle)
+
+    def _sync_icon(self, button: QPushButton, checked: bool) -> None:
+        color = get_theme().accent if checked else get_theme().muted
+        refresh_button_icon(button, color)
+
+    def set_current(self, index: int) -> None:
+        button = self.group.button(index)
+        if button is not None and not button.isChecked():
+            button.setChecked(True)
+
+    def current_index(self) -> int:
+        button = self.group.checkedButton()
+        return self.group.id(button) if button is not None else 0
+
+    def set_status(self, text: str, running: bool = False) -> None:
+        self._running = running
+        self.status.setText("●  " + text)
+        color = get_theme().success if running else get_theme().muted
+        self.status.setStyleSheet(f"color: {color};")
+
+    def toggle_collapsed(self) -> None:
+        self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self._collapsed = collapsed
+        self.setFixedWidth(68 if collapsed else 212)
+        self.caption.setVisible(not collapsed)
+        self.version.setVisible(not collapsed)
+        self.status.setVisible(not collapsed)
+        self.toggle.setToolTip(
+            tr("Rozwiń nawigację") if collapsed else tr("Zwiń nawigację")
+        )
+        self.toggle.setProperty(
+            "themeIconName", "chevron-right" if collapsed else "chevron-left"
+        )
+        refresh_button_icon(self.toggle, get_theme().muted)
+        for button, label in zip(self.buttons, self._labels):
+            button.setText("" if collapsed else label)
+            button.setToolTip(label if collapsed else "")
+            button.setStyleSheet(
+                "text-align: center; padding-left: 12px; padding-right: 0;"
+                if collapsed
+                else ""
+            )
+
+    def refresh_icons(self) -> None:
+        theme = get_theme()
+        for button in self.buttons:
+            color = theme.accent if button.isChecked() else theme.muted
+            refresh_button_icon(button, color)
+        refresh_button_icon(self.toggle, theme.muted)
+        self.set_status(
+            tr("Gra uruchomiona") if self._running else tr("Gotowy"),
+            self._running,
+        )
+
+
 class ColorButton(QPushButton):
     color_changed = pyqtSignal(str)
 
     def __init__(self, color: str, title: str, parent=None) -> None:
         super().__init__(parent)
         self._title = title
-        self._color = color if QColor(color).isValid() else "#00E5FF"
+        self._color = color if QColor(color).isValid() else get_theme().accent
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(34)
         self.setMinimumWidth(120)
@@ -1130,12 +1661,13 @@ class ColorButton(QPushButton):
 
     def _apply_style(self) -> None:
         color = QColor(self._color)
-        text = "#061014" if color.lightness() > 150 else "#FFFFFF"
+        theme = get_theme()
+        text = "#101014" if color.lightness() > 160 else "#FFFFFF"
         self.setText(self._color.upper())
         self.setStyleSheet(
             f"QPushButton {{ background:{self._color}; color:{text}; "
-            "border:1px solid #3A4750; border-radius:6px; "
-            "font-family:'DejaVu Sans Mono'; font-weight:700; padding:6px; }"
+            f"border:1px solid {theme.border_strong}; border-radius:8px; "
+            "font-weight:700; padding:6px; }"
             "QPushButton:hover { border:1px solid #FFFFFF; }"
         )
 
@@ -1195,37 +1727,50 @@ class OverlayPreview(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
+        theme = get_theme()
         gradient = QLinearGradient(0, 0, rect.width(), rect.height())
-        gradient.setColorAt(0.0, QColor("#0A1217"))
-        gradient.setColorAt(0.55, QColor("#101822"))
-        gradient.setColorAt(1.0, QColor("#1C1018"))
+        gradient.setColorAt(0.0, QColor(theme.background))
+        gradient.setColorAt(0.55, QColor(theme.surface))
+        gradient.setColorAt(1.0, QColor(theme.background_dark))
         painter.fillRect(rect, gradient)
-        painter.setPen(QPen(QColor(255, 255, 255, 10), 1))
+        grid = QColor(theme.border)
+        grid.setAlpha(110)
+        painter.setPen(QPen(grid, 1))
         for x in range(0, rect.width(), 32):
             painter.drawLine(x, 0, x, rect.height())
         for y in range(0, rect.height(), 32):
             painter.drawLine(0, y, rect.width(), y)
 
         profile = self._profile
-        rows: list[tuple[str, str, str]] = []
+        theme = get_theme()
+        accent = self._pos_color(str(profile.get("accent", theme.accent)), theme.accent)
+        gpu_color = self._pos_color(str(profile.get("gpu_color", theme.success)), theme.success)
+        cpu_color = self._pos_color(str(profile.get("cpu_color", theme.accent_hover)), theme.accent_hover)
+        rows: list[tuple[str, str, QColor]] = []
         if profile.get("show_fps", True):
-            rows.append(("144", "FPS", "#00E5FF"))
+            rows.append(("144", "FPS", accent))
         if profile.get("show_gpu", True):
             gpu_temp = "  61°C" if profile.get("show_temps", True) else ""
-            rows.append(("GPU 74%", f"  4.2 GB{gpu_temp}", "#42F5A7"))
+            rows.append(("GPU 74%", f"  4.2 GB{gpu_temp}", gpu_color))
         if profile.get("show_cpu", True):
             cpu_temp = "  55°C" if profile.get("show_temps", True) else ""
-            rows.append(("CPU 43%", f"  5.1 GHz{cpu_temp}", "#00B8FF"))
+            rows.append(("CPU 43%", f"  5.1 GHz{cpu_temp}", cpu_color))
         if profile.get("show_ram", True) or profile.get("show_vram", True):
             parts = []
             if profile.get("show_ram", True):
                 parts.append("RAM 12.4G")
             if profile.get("show_vram", True):
                 parts.append("VRAM 7.8G")
-            rows.append((" / ".join(parts), "", "#C9A7FF"))
+            rows.append((" / ".join(parts), "", accent))
         if profile.get("show_frametime", True):
-            rows.append(("FT 6.9 ms", "", "#FFB347"))
-        rows.append((tr("Scaling: {label}", label=scaling_label(self._scaling)), "", "#DCEBF1"))
+            rows.append(("FT 6.9 ms", "", QColor(theme.warning)))
+        rows.append(
+            (
+                tr("Scaling: {label}", label=scaling_label(self._scaling)),
+                "",
+                QColor(theme.text),
+            )
+        )
 
         width = min(390, max(280, rect.width() - 36))
         row_height = 24
@@ -1247,18 +1792,22 @@ class OverlayPreview(QWidget):
 
         alpha = int(max(0.0, min(1.0, float(profile.get("background_alpha", 0.35)))) * 255)
         panel = QRectF(x, y, width, height)
-        painter.setBrush(QColor(7, 12, 15, alpha))
-        painter.setPen(QPen(QColor(0, 229, 255, 90), 1))
+        panel_color = QColor(theme.background_dark)
+        panel_color.setAlpha(alpha)
+        painter.setBrush(panel_color)
+        border_color = QColor(theme.border)
+        border_color.setAlpha(160)
+        painter.setPen(QPen(border_color, 1))
         radius = max(0, min(20, int(profile.get("round_corners", 8))))
         painter.drawRoundedRect(panel, radius, radius)
-        painter.setPen(QPen(self._pos_color(str(profile.get("accent", "#00E5FF")), "#00E5FF"), 3))
+        painter.setPen(QPen(accent, 3))
         painter.drawLine(
             QPointF(panel.left() + 1, panel.top() + 8),
             QPointF(panel.left() + 1, panel.bottom() - 8),
         )
         font_size = max(8, min(24, int(profile.get("font_size", 18)) // 2 + 2))
         painter.setFont(QFont("DejaVu Sans Mono", font_size, QFont.Weight.DemiBold))
-        text_color = self._pos_color(str(profile.get("text_color", "#E6FAFF")), "#E6FAFF")
+        text_color = self._pos_color(str(profile.get("text_color", theme.text)), theme.text)
         for index, (left, right, color_value) in enumerate(rows):
             row_y = panel.top() + 14 + index * row_height
             painter.setPen(text_color)
@@ -1268,7 +1817,7 @@ class OverlayPreview(QWidget):
                 left,
             )
             if right:
-                painter.setPen(self._pos_color(color_value, "#00E5FF"))
+                painter.setPen(color_value)
                 painter.drawText(
                     QRectF(panel.left() + 14, row_y, width - 28, row_height),
                     int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
@@ -1279,7 +1828,7 @@ class OverlayPreview(QWidget):
                 graph_x = panel.right() - graph_width - 16
                 for bar in range(18):
                     bar_height = 3 + ((bar * 7 + index * 3) % 12)
-                    painter.setBrush(self._pos_color("#FFB347", "#FFB347"))
+                    painter.setBrush(color_value)
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.drawRect(
                         QRectF(
@@ -1289,13 +1838,162 @@ class OverlayPreview(QWidget):
                             bar_height,
                         )
                     )
-        painter.setPen(QColor("#5F7681"))
+        painter.setPen(QColor(theme.muted))
         painter.setFont(QFont("DejaVu Sans Mono", 7))
         painter.drawText(
             QRect(12, rect.height() - 20, 220, 14),
             Qt.AlignmentFlag.AlignLeft,
-            tr("PODGLĄD // MANGOHUD"),
+            tr("Podgląd MangoHud"),
         )
+        painter.end()
+
+
+class HeroBanner(QFrame):
+    """Large featured-game banner with a blurred cover backdrop."""
+
+    play_requested = pyqtSignal(int)
+    edit_requested = pyqtSignal(int)
+    menu_requested = pyqtSignal(int, object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("HeroBanner")
+        self.setFixedHeight(236)
+        self.setMinimumWidth(460)
+        self._game: dict[str, Any] | None = None
+        self._pixmap: QPixmap | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 22, 28, 22)
+        layout.setSpacing(8)
+        self.kicker = QLabel("")
+        self.kicker.setObjectName("HeroKicker")
+        top = QHBoxLayout()
+        top.addWidget(self.kicker)
+        top.addStretch(1)
+        layout.addLayout(top)
+        layout.addStretch(1)
+
+        self.title = QLabel(tr("Biblioteka jest pusta"))
+        self.title.setObjectName("HeroTitle")
+        self.title.setWordWrap(True)
+        layout.addWidget(self.title)
+
+        self.meta = QLabel(tr("Dodaj pierwszą grę, aby zacząć."))
+        self.meta.setObjectName("HeroMeta")
+        self.meta.setWordWrap(True)
+        layout.addWidget(self.meta)
+        layout.addSpacing(4)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.play = QPushButton(tr("▶   Graj"))
+        self.play.setObjectName("HeroPlay")
+        self.play.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play.clicked.connect(self._emit_play)
+        actions.addWidget(self.play)
+        self.edit = QPushButton(tr("Edytuj"))
+        self.edit.setObjectName("HeroGhost")
+        self.edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit.clicked.connect(self._emit_edit)
+        actions.addWidget(self.edit)
+        self.more = QPushButton()
+        self.more.setObjectName("HeroIcon")
+        self.more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.more.setToolTip(tr("Więcej"))
+        set_button_icon(self.more, "dots", "#FFFFFF", 18)
+        self.more.clicked.connect(self._emit_menu)
+        actions.addWidget(self.more)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+
+        self.set_game(None, None)
+
+    def set_game(
+        self, game: dict[str, Any] | None, pixmap: QPixmap | None
+    ) -> None:
+        self._game = game
+        self._pixmap = pixmap
+        if not game:
+            self.title.setText(tr("Biblioteka jest pusta"))
+            self.meta.setText(tr("Dodaj pierwszą grę, aby zacząć."))
+            self.kicker.hide()
+            self.play.hide()
+            self.edit.hide()
+            self.more.hide()
+        else:
+            self.title.setText(str(game.get("name", tr("Bez nazwy"))))
+            bits = game.get("_bits")
+            parts = [
+                tr("Steam") if game.get("is_steam") else tr("Standalone"),
+                scaling_label(str(game.get("scaling_mode", "native"))),
+                f"{int(game.get('fps_limit', 0)) or '∞'} FPS",
+            ]
+            if bits:
+                parts.append(f"{bits}-BIT")
+            self.meta.setText("   ·   ".join(parts))
+            self.kicker.setText(
+                tr("STEAM") if game.get("is_steam") else tr("STANDALONE")
+            )
+            self.kicker.show()
+            self.play.show()
+            self.edit.show()
+            self.more.show()
+        self.update()
+
+    def _game_id(self) -> int:
+        return int(self._game["id"]) if self._game else 0
+
+    def _emit_play(self) -> None:
+        if self._game:
+            self.play_requested.emit(self._game_id())
+
+    def _emit_edit(self) -> None:
+        if self._game:
+            self.edit_requested.emit(self._game_id())
+
+    def _emit_menu(self) -> None:
+        if self._game:
+            self.menu_requested.emit(
+                self._game_id(), self.more.mapToGlobal(QPoint(0, self.more.height() + 4))
+            )
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        theme = get_theme()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 16, 16)
+        painter.save()
+        painter.setClipPath(path)
+        if self._pixmap is not None and not self._pixmap.isNull():
+            target = QSize(max(6, self.width() // 22), max(6, self.height() // 22))
+            tiny = self._pixmap.scaled(
+                target,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(self.rect(), tiny, tiny.rect())
+        else:
+            gradient = QLinearGradient(0, 0, self.width(), self.height())
+            gradient.setColorAt(0.0, QColor(theme.surface_alt))
+            gradient.setColorAt(1.0, QColor(theme.background_dark))
+            painter.fillRect(self.rect(), gradient)
+        scrim = QLinearGradient(0, 0, self.width(), 0)
+        scrim.setColorAt(0.0, QColor(8, 8, 10, 236))
+        scrim.setColorAt(0.55, QColor(8, 8, 10, 160))
+        scrim.setColorAt(1.0, QColor(8, 8, 10, 130))
+        painter.fillRect(self.rect(), scrim)
+        bottom = QLinearGradient(0, self.height() * 0.55, 0, self.height())
+        bottom.setColorAt(0.0, QColor(0, 0, 0, 0))
+        bottom.setColorAt(1.0, QColor(0, 0, 0, 120))
+        painter.fillRect(self.rect(), bottom)
+        painter.restore()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        painter.drawRoundedRect(rect, 16, 16)
         painter.end()
 
 
@@ -1304,12 +2002,15 @@ class GameCard(QFrame):
     edit_requested = pyqtSignal(int)
     delete_requested = pyqtSignal(int)
     context_requested = pyqtSignal(int, object)
+    selected = pyqtSignal(int)
 
-    def __init__(self, game: dict[str, Any], cover: QPixmap | None, parent=None) -> None:
+    def __init__(
+        self, game: dict[str, Any], cover: QPixmap | None, parent=None
+    ) -> None:
         super().__init__(parent)
         self.game = game
         self.setObjectName("Card")
-        self.setFixedWidth(244)
+        self.setFixedWidth(196)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
@@ -1318,51 +2019,98 @@ class GameCard(QFrame):
             )
         )
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(9, 9, 9, 10)
-        layout.setSpacing(7)
+        layout.setContentsMargins(0, 0, 0, 2)
+        layout.setSpacing(6)
+
         self.cover = CoverView(
             str(game.get("name", "?")), cover, game_source(game)
         )
-        self.cover.setFixedHeight(310)
+        self.cover.setFixedHeight(262)
         layout.addWidget(self.cover)
-        title = QLabel(str(game.get("name", tr("Bez nazwy"))))
-        title.setObjectName("CardTitle")
-        title.setToolTip(str(game.get("name", "")))
-        title.setMaximumHeight(24)
-        layout.addWidget(title)
+
+        self.title = QLabel(str(game.get("name", tr("Bez nazwy"))))
+        self.title.setObjectName("CardTitle")
+        self.title.setToolTip(str(game.get("name", "")))
+        self.title.setWordWrap(True)
+        self.title.setFixedHeight(36)
+        self.title.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        layout.addWidget(self.title)
+
         bits = game.get("_bits")
-        bit_suffix = f"  |  {bits}-BIT" if bits else ""
+        suffix = f"  ·  {bits}-bit" if bits else ""
         meta = QLabel(
-            f"{scaling_label(str(game.get('scaling_mode', 'native')))}  |  "
-            f"{int(game.get('fps_limit', 0)) or '∞'} FPS{bit_suffix}"
+            f"{scaling_label(str(game.get('scaling_mode', 'native')))}"
+            f"  ·  {int(game.get('fps_limit', 0)) or '∞'} FPS{suffix}"
         )
         meta.setObjectName("CardMeta")
         meta.setToolTip(meta.text())
         layout.addWidget(meta)
-        actions = QHBoxLayout()
-        actions.setSpacing(4)
-        play = QPushButton(tr("▶  GRAJ"))
-        play.setObjectName("CardPlay")
-        play.clicked.connect(lambda: self.launch_requested.emit(int(self.game["id"])))
-        actions.addWidget(play, 1)
-        edit = QPushButton(tr("✎"))
-        edit.setObjectName("CardIcon")
-        edit.setToolTip(tr("Edytuj"))
-        edit.clicked.connect(lambda: self.edit_requested.emit(int(self.game["id"])))
-        actions.addWidget(edit)
-        delete = QPushButton(tr("×"))
-        delete.setObjectName("CardIcon")
-        delete.setProperty("class", "danger")
-        delete.setStyleSheet(
-            "QPushButton { background:transparent; border:1px solid #2A343D; "
-            "border-radius:6px; color:#8FA3AE; padding:5px 8px; }"
-            "QPushButton:hover { color:#FF4D6D; border-color:#B92341; }"
+
+        self.overlay = QWidget(self)
+        self.overlay.setObjectName("CardOverlay")
+        self.overlay.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True
         )
-        delete.setToolTip(tr("Usuń z biblioteki"))
-        delete.clicked.connect(lambda: self.delete_requested.emit(int(self.game["id"])))
-        actions.addWidget(delete)
-        layout.addLayout(actions)
-        self.setFixedHeight(430)
+        overlay_layout = QVBoxLayout(self.overlay)
+        overlay_layout.setContentsMargins(10, 10, 10, 10)
+        overlay_layout.setSpacing(0)
+        overlay_top = QHBoxLayout()
+        overlay_top.addStretch(1)
+        self.more = QPushButton()
+        self.more.setObjectName("OverlayMore")
+        self.more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.more.setToolTip(tr("Więcej"))
+        set_button_icon(self.more, "dots", "#FFFFFF", 16)
+        self.more.clicked.connect(self._emit_menu)
+        overlay_top.addWidget(self.more)
+        overlay_layout.addLayout(overlay_top)
+        overlay_layout.addStretch(1)
+        self.play = QPushButton()
+        self.play.setObjectName("OverlayPlay")
+        self.play.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play.setToolTip(tr("Uruchom grę"))
+        set_button_icon(self.play, "play", "#FFFFFF", 20)
+        self.play.clicked.connect(
+            lambda: self.launch_requested.emit(int(self.game["id"]))
+        )
+        overlay_layout.addWidget(
+            self.play, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        overlay_layout.addStretch(1)
+        self.overlay.hide()
+
+    def _emit_menu(self) -> None:
+        self.context_requested.emit(
+            int(self.game["id"]),
+            self.more.mapToGlobal(QPoint(0, self.more.height() + 4)),
+        )
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.overlay.setGeometry(self.cover.geometry())
+
+    def enterEvent(self, event: QEvent) -> None:  # noqa: N802
+        self.overlay.setGeometry(self.cover.geometry())
+        self.overlay.show()
+        self.overlay.raise_()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802
+        self.overlay.hide()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit(int(self.game["id"]))
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1375,12 +2123,15 @@ class CompactGameRow(QFrame):
     edit_requested = pyqtSignal(int)
     delete_requested = pyqtSignal(int)
     context_requested = pyqtSignal(int, object)
+    selected = pyqtSignal(int)
 
-    def __init__(self, game: dict[str, Any], cover: QPixmap | None, parent=None) -> None:
+    def __init__(
+        self, game: dict[str, Any], cover: QPixmap | None, parent=None
+    ) -> None:
         super().__init__(parent)
         self.game = game
         self.setObjectName("CompactRow")
-        self.setFixedHeight(104)
+        self.setFixedHeight(76)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
@@ -1389,61 +2140,71 @@ class CompactGameRow(QFrame):
             )
         )
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 7, 10, 7)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(12)
+
         cover_widget = CoverView(
             str(game.get("name", "?")), cover, game_source(game)
         )
-        cover_widget.setFixedSize(64, 88)
+        cover_widget.setFixedSize(44, 60)
         layout.addWidget(cover_widget)
+
         info = QVBoxLayout()
         info.setSpacing(3)
         title = QLabel(str(game.get("name", tr("Bez nazwy"))))
         title.setObjectName("CardTitle")
         info.addWidget(title)
-        path = QLabel(str(game.get("exe_path", "")))
-        path.setObjectName("CardMeta")
-        path.setToolTip(path.text())
-        info.addWidget(path)
         bits = game.get("_bits")
-        if game.get("is_steam"):
-            source_text = f"STEAM  //  APPID {game.get('steam_appid', '?')}"
-        elif game.get("is_amazon"):
-            source_text = f"AMAZON  //  {game.get('amazon_id', '?')}"
-        elif game.get("store"):
-            source_text = f"{str(game.get('store')).upper()}  //  {game.get('store_id', '?')}"
-        else:
-            source_text = "STANDALONE"
+        source = game_source(game) or tr("Standalone")
         if bits:
-            source_text += f"  //  {bits}-BIT"
-        source = QLabel(source_text)
-        source.setObjectName("Accent")
-        source.setStyleSheet("font-size:8pt; font-family:'DejaVu Sans Mono';")
-        info.addWidget(source)
+            source += f"  ·  {bits}-bit"
+        meta = QLabel(
+            f"{source}  ·  "
+            f"{scaling_label(str(game.get('scaling_mode', 'native')))}  ·  "
+            f"{int(game.get('fps_limit', 0)) or '∞'} FPS"
+        )
+        meta.setObjectName("CardMeta")
+        info.addWidget(meta)
         layout.addLayout(info, 1)
-        profile = QLabel(scaling_label(str(game.get("scaling_mode", "native"))))
-        profile.setObjectName("Muted")
-        profile.setMinimumWidth(170)
-        layout.addWidget(profile)
-        fps = QLabel(f"{int(game.get('fps_limit', 0)) or '∞'} FPS")
-        fps.setObjectName("Accent")
-        fps.setMinimumWidth(62)
-        fps.setStyleSheet("font-family:'DejaVu Sans Mono'; font-weight:700;")
-        layout.addWidget(fps)
-        play = QPushButton(tr("▶  GRAJ"))
+
+        play = QPushButton(tr("▶   Graj"))
         play.setObjectName("CardPlay")
-        play.clicked.connect(lambda: self.launch_requested.emit(int(self.game["id"])))
+        play.setCursor(Qt.CursorShape.PointingHandCursor)
+        play.clicked.connect(
+            lambda: self.launch_requested.emit(int(self.game["id"]))
+        )
         layout.addWidget(play)
-        edit = QPushButton(tr("✎"))
+
+        edit = QPushButton()
         edit.setObjectName("CardIcon")
+        edit.setCursor(Qt.CursorShape.PointingHandCursor)
         edit.setToolTip(tr("Edytuj"))
-        edit.clicked.connect(lambda: self.edit_requested.emit(int(self.game["id"])))
+        set_button_icon(edit, "pencil", get_theme().muted, 16)
+        edit.clicked.connect(
+            lambda: self.edit_requested.emit(int(self.game["id"]))
+        )
         layout.addWidget(edit)
-        delete = QPushButton(tr("×"))
+
+        delete = QPushButton()
         delete.setObjectName("CardIcon")
-        delete.setToolTip(tr("Usuń"))
-        delete.clicked.connect(lambda: self.delete_requested.emit(int(self.game["id"])))
+        delete.setProperty("class", "danger")
+        delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete.setToolTip(tr("Usuń z biblioteki"))
+        set_button_icon(delete, "trash", get_theme().muted, 16)
+        delete.clicked.connect(
+            lambda: self.delete_requested.emit(int(self.game["id"]))
+        )
         layout.addWidget(delete)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit(int(self.game["id"]))
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1476,10 +2237,7 @@ class GameDialog(QDialog):
         outer.setSpacing(14)
 
         kicker = QLabel(
-            tr(
-                "BIBLIOTEKA // {section}",
-                section=tr("EDYCJA") if game else tr("NOWY WPIS"),
-            )
+            tr("Biblioteka")
         )
         kicker.setObjectName("PageKicker")
         outer.addWidget(kicker)
@@ -1489,7 +2247,7 @@ class GameDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        style_scroll_area(scroll, "#0E1114")
+        style_scroll_area(scroll)
         form_host = QWidget()
         form = QFormLayout(form_host)
         form.setContentsMargins(2, 2, 12, 2)
@@ -1602,18 +2360,23 @@ class GameDialog(QDialog):
             steam_layout = QVBoxLayout(steam_host)
             steam_layout.setContentsMargins(0, 0, 0, 0)
             steam_layout.setSpacing(6)
+            steam_text = tr(
+                "STEAM  AppID {appid} — "
+                "wpis zaimportowany. Uruchamianie odbywa się przez klienta "
+                "Steam; wrapper aplikuje MangoHud, skalowanie i limit FPS. "
+                "Runner i WINEPREFIX są właściwościami Steam/Protona.",
+                appid=html.escape(str(game.get("steam_appid", ""))),
+            )
             steam_info = QLabel(
-                tr(
-                    "<span style='color:#00E5FF'>STEAM</span>  AppID {appid} — "
-                    "wpis zaimportowany. Uruchamianie odbywa się przez klienta "
-                    "Steam; wrapper aplikuje MangoHud, skalowanie i limit FPS. "
-                    "Runner i WINEPREFIX są właściwościami Steam/Protona.",
-                    appid=html.escape(str(game.get("steam_appid", ""))),
+                steam_text.replace(
+                    "STEAM",
+                    f"<span style='color:{get_theme().accent}'>STEAM</span>",
+                    1,
                 )
             )
             steam_info.setWordWrap(True)
             steam_layout.addWidget(steam_info)
-            copy_option = QPushButton(tr("KOPIUJ OPCJĘ URUCHAMIANIA STEAM"))
+            copy_option = QPushButton(tr("Kopiuj opcję uruchamiania Steam"))
             copy_option.setObjectName("GhostButton")
             copy_option.clicked.connect(self._copy_steam_option)
             steam_layout.addWidget(copy_option, 0, Qt.AlignmentFlag.AlignLeft)
@@ -1676,10 +2439,10 @@ class GameDialog(QDialog):
         save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
         cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
         if save_button:
-            save_button.setText(tr("ZAPISZ"))
+            save_button.setText(tr("Zapisz"))
             save_button.setObjectName("PrimaryButton")
         if cancel_button:
-            cancel_button.setText(tr("ANULUJ"))
+            cancel_button.setText(tr("Anuluj"))
             cancel_button.setObjectName("GhostButton")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
@@ -1919,7 +2682,7 @@ class WinetricksDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(22, 18, 22, 18)
         outer.setSpacing(12)
-        kicker = QLabel(tr("NARZĘDZIA // WINETRICKS"))
+        kicker = QLabel(tr("Komponenty Winetricks"))
         kicker.setObjectName("PageKicker")
         outer.addWidget(kicker)
         heading = QLabel(tr("Komponenty Windows"))
@@ -1930,7 +2693,7 @@ class WinetricksDialog(QDialog):
         self.mode_label.setWordWrap(True)
         outer.addWidget(self.mode_label)
 
-        presets = QGroupBox(tr("KOMPONENTY"))
+        presets = QGroupBox(tr("Komponenty"))
         presets_layout = QGridLayout(presets)
         presets_layout.setHorizontalSpacing(18)
         presets_layout.setVerticalSpacing(8)
@@ -1974,20 +2737,20 @@ class WinetricksDialog(QDialog):
         outer.addWidget(self.status_label)
 
         actions = QHBoxLayout()
-        self.install_button = QPushButton(tr("ZAINSTALUJ WYBRANE"))
+        self.install_button = QPushButton(tr("Zainstaluj wybrane"))
         self.install_button.setObjectName("PrimaryButton")
         self.install_button.clicked.connect(self._install_selected)
         actions.addWidget(self.install_button)
-        self.download_button = QPushButton(tr("ZAINSTALUJ WINETRICKS"))
+        self.download_button = QPushButton(tr("Zainstaluj Winetricks"))
         self.download_button.setObjectName("GhostButton")
         self.download_button.clicked.connect(self._install_winetricks)
         actions.addWidget(self.download_button)
-        refresh = QPushButton(tr("ODŚWIEŻ STATUS"))
+        refresh = QPushButton(tr("Odśwież status"))
         refresh.setObjectName("GhostButton")
         refresh.clicked.connect(self._refresh_status)
         actions.addWidget(refresh)
         actions.addStretch(1)
-        close = QPushButton(tr("ZAMKNIJ"))
+        close = QPushButton(tr("Zamknij"))
         close.setObjectName("GhostButton")
         close.clicked.connect(self.accept)
         actions.addWidget(close)
@@ -2265,7 +3028,7 @@ class SettingsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 24, 28, 20)
         outer.setSpacing(16)
-        kicker = QLabel(tr("SYSTEM // GLOBAL"))
+        kicker = QLabel(tr("Konfiguracja systemu"))
         kicker.setObjectName("PageKicker")
         outer.addWidget(kicker)
         heading = QLabel(tr("Ustawienia globalne"))
@@ -2288,7 +3051,7 @@ class SettingsPage(QWidget):
         body.setSpacing(14)
 
         appearance, appearance_layout = self._panel(
-            tr("WYGLĄD"),
+            tr("Wygląd"),
             tr("Motyw interfejsu, okna konsolowego, tray i ikony aplikacji."),
         )
         appearance_form = QFormLayout()
@@ -2316,7 +3079,7 @@ class SettingsPage(QWidget):
         body.addWidget(appearance)
 
         runtime, runtime_layout = self._panel(
-            tr("RUNTIME"), tr("Domyślny silnik i dostępne integracje.")
+            tr("Runtime"), tr("Domyślny silnik i dostępne integracje.")
         )
         form = QFormLayout()
         form.setSpacing(11)
@@ -2387,7 +3150,7 @@ class SettingsPage(QWidget):
         api_form.addRow(tr("SteamID64"), self.steam_id_edit)
         steam_layout.addLayout(api_form)
         api_actions = QHBoxLayout()
-        api_help = QPushButton(tr("POBIERZ KLUCZ API"))
+        api_help = QPushButton(tr("Pobierz klucz API"))
         api_help.setObjectName("GhostButton")
         api_help.clicked.connect(
             lambda: QDesktopServices.openUrl(
@@ -2395,7 +3158,7 @@ class SettingsPage(QWidget):
             )
         )
         api_actions.addWidget(api_help)
-        library_sync = QPushButton(tr("POBIERZ BIBLIOTEKĘ STEAM"))
+        library_sync = QPushButton(tr("Pobierz bibliotekę Steam"))
         library_sync.setObjectName("PrimaryButton")
         library_sync.clicked.connect(self._request_steam_library_sync)
         api_actions.addWidget(library_sync)
@@ -2412,7 +3175,7 @@ class SettingsPage(QWidget):
         self.steam_library_status.setWordWrap(True)
         steam_layout.addWidget(self.steam_library_status)
         steam_actions = QHBoxLayout()
-        sync_button = QPushButton(tr("↻  SYNCHRONIZUJ STEAM"))
+        sync_button = QPushButton(tr("Synchronizuj Steam"))
         sync_button.setObjectName("GhostButton")
         sync_button.clicked.connect(self.steam_sync_requested.emit)
         steam_actions.addWidget(sync_button)
@@ -2450,7 +3213,7 @@ class SettingsPage(QWidget):
         body.addWidget(stores_panel)
 
         wrapper_panel, wrapper_layout = self._panel(
-            tr("STEAM WRAPPER"),
+            tr("Steam wrapper"),
             tr("Nakłada MangoHud, Gamescope, GameMode i limit FPS również na gry "
             "uruchamiane z klienta Steam."),
         )
@@ -2466,22 +3229,22 @@ class SettingsPage(QWidget):
 
         wrapper_layout.addWidget(self.auto_wrapper_cb)
         wrapper_actions = QHBoxLayout()
-        install_wrapper = QPushButton(tr("ZAINSTALUJ / ODŚWIEŻ WRAPPER"))
+        install_wrapper = QPushButton(tr("Zainstaluj / odśwież wrapper"))
         install_wrapper.setObjectName("GhostButton")
         install_wrapper.clicked.connect(self._install_wrapper)
         wrapper_actions.addWidget(install_wrapper)
-        copy_wrapper = QPushButton(tr("KOPIUJ OPCJĘ URUCHAMIANIA"))
+        copy_wrapper = QPushButton(tr("Kopiuj opcję uruchamiania"))
         copy_wrapper.setObjectName("GhostButton")
         copy_wrapper.clicked.connect(self._copy_wrapper_option)
         wrapper_actions.addWidget(copy_wrapper)
         wrapper_actions.addStretch(1)
         wrapper_layout.addLayout(wrapper_actions)
         wrapper_batch = QHBoxLayout()
-        apply_all = QPushButton(tr("ZASTOSUJ DO WSZYSTKICH GIER STEAM"))
+        apply_all = QPushButton(tr("Zastosuj do wszystkich gier Steam"))
         apply_all.setObjectName("PrimaryButton")
         apply_all.clicked.connect(self.steam_wrapper_batch_requested.emit)
         wrapper_batch.addWidget(apply_all)
-        restore = QPushButton(tr("PRZYWRÓĆ OSTATNI BACKUP"))
+        restore = QPushButton(tr("Przywróć ostatni backup"))
         restore.setObjectName("GhostButton")
         restore.clicked.connect(self.steam_restore_requested.emit)
         wrapper_batch.addWidget(restore)
@@ -2498,7 +3261,7 @@ class SettingsPage(QWidget):
         body.addWidget(wrapper_panel)
 
         deps_panel, deps_layout = self._panel(
-            tr("ZALEŻNOŚCI"),
+            tr("Zależności"),
             tr("MangoHud i GameMode są instalowane przez pakiet .deb. "
             "W AppImage użyj przycisku instalacji (pkexec)."),
         )
@@ -2507,23 +3270,23 @@ class SettingsPage(QWidget):
         self.deps_label.setWordWrap(True)
         deps_layout.addWidget(self.deps_label)
         deps_actions = QHBoxLayout()
-        refresh_deps = QPushButton(tr("ODŚWIEŻ STATUS"))
+        refresh_deps = QPushButton(tr("Odśwież status"))
         refresh_deps.setObjectName("GhostButton")
         refresh_deps.clicked.connect(self._refresh_deps)
         deps_actions.addWidget(refresh_deps)
-        self.install_deps_button = QPushButton(tr("ZAINSTALUJ BRAKUJĄCE"))
+        self.install_deps_button = QPushButton(tr("Zainstaluj brakujące"))
         self.install_deps_button.setObjectName("PrimaryButton")
         self.install_deps_button.clicked.connect(self._install_dependencies)
         deps_actions.addWidget(self.install_deps_button)
-        self.install_m32_button = QPushButton(tr("MANGOHUD 32-BIT"))
+        self.install_m32_button = QPushButton(tr("MangoHud 32-bit"))
         self.install_m32_button.setObjectName("GhostButton")
         self.install_m32_button.clicked.connect(self._install_mangohud32)
         deps_actions.addWidget(self.install_m32_button)
-        self.install_winetricks_button = QPushButton(tr("ZAINSTALUJ WINETRICKS"))
+        self.install_winetricks_button = QPushButton(tr("Zainstaluj Winetricks"))
         self.install_winetricks_button.setObjectName("GhostButton")
         self.install_winetricks_button.clicked.connect(self._install_winetricks)
         deps_actions.addWidget(self.install_winetricks_button)
-        self.gamepad_udev_button = QPushButton(tr("WŁĄCZ OBSŁUGĘ PADA"))
+        self.gamepad_udev_button = QPushButton(tr("Włącz obsługę pada"))
         self.gamepad_udev_button.setObjectName("GhostButton")
         self.gamepad_udev_button.clicked.connect(self._install_gamepad_udev)
         deps_actions.addWidget(self.gamepad_udev_button)
@@ -2537,7 +3300,7 @@ class SettingsPage(QWidget):
         body.addWidget(deps_panel)
 
         maint_panel, maint_layout = self._panel(
-            tr("KONSERWACJA"), tr("Logi, konfiguracja i cache shaderów.")
+            tr("Konserwacja"), tr("Logi, konfiguracja i cache shaderów.")
         )
         self.config_label = QLabel(str(config_dir()))
         self.config_label.setObjectName("Muted")
@@ -2547,9 +3310,9 @@ class SettingsPage(QWidget):
         maint_layout.addWidget(self.config_label)
         maint_buttons = QHBoxLayout()
         for text, slot, style in (
-            (tr("POKAŻ LAST_RUN.LOG"), self.open_log, "GhostButton"),
-            (tr("OTWÓRZ KONFIGURACJĘ"), self.open_config, "GhostButton"),
-            (tr("WYCZYŚĆ SHADER CACHE"), self.clear_cache_requested.emit, "DangerButton"),
+            (tr("Pokaż last_run.log"), self.open_log, "GhostButton"),
+            (tr("Otwórz konfigurację"), self.open_config, "GhostButton"),
+            (tr("Wyczyść shader cache"), self.clear_cache_requested.emit, "DangerButton"),
         ):
             button = QPushButton(text)
             button.setObjectName(style)
@@ -2567,7 +3330,7 @@ class SettingsPage(QWidget):
         self.status_label.setObjectName("Muted")
         footer.addWidget(self.status_label)
         footer.addStretch(1)
-        save = QPushButton(tr("ZAPISZ USTAWIENIA"))
+        save = QPushButton(tr("Zapisz ustawienia"))
         save.setObjectName("PrimaryButton")
         save.clicked.connect(self.save)
         footer.addWidget(save)
@@ -2801,46 +3564,47 @@ class SettingsPage(QWidget):
         for tool in tool_status():
             if tool.installed:
                 rows.append(
-                    f"<span style='color:#42F5A7'>●</span> "
+                    f"<span style='color:{get_theme().success}'>●</span> "
                     f"<b>{html.escape(tool.label)}</b> "
-                    f"<span style='color:#69808B'>{html.escape(tool.path)}</span>"
+                    f"<span style='color:{get_theme().muted}'>{html.escape(tool.path)}</span>"
                 )
             else:
                 rows.append(
-                    f"<span style='color:#FFB347'>○</span> "
+                    f"<span style='color:{get_theme().warning}'>○</span> "
                     f"<b>{html.escape(tool.label)}</b> "
-                    f"<span style='color:#69808B'>"
+                    f"<span style='color:{get_theme().muted}'>"
                     f"{tr('brak w PATH (pakiet: {package})', package=tool.package)}"
                     "</span>"
                 )
         m32 = mangohud32_path()
         rows.append(
-            f"<span style='color:{'#42F5A7' if m32 else '#FFB347'}'>●</span> "
+            f"<span style='color:{get_theme().success if m32 else get_theme().warning}'>●</span> "
             f"<b>MangoHud 32-bit</b> "
-            f"<span style='color:#69808B'>"
+            f"<span style='color:{get_theme().muted}'>"
             f"{html.escape(m32) if m32 else tr('brak — wymagany dla gier PE32')}"
             "</span>"
         )
         winetricks = winetricks_path()
         protontricks = protontricks_path()
+        theme = get_theme()
         rows.append(
-            f"<span style='color:{'#42F5A7' if winetricks else '#FFB347'}'>"
+            f"<span style='color:{theme.success if winetricks else theme.warning}'>"
             f"{'●' if winetricks else '○'}</span> "
             f"<b>Winetricks</b> "
-            f"<span style='color:#69808B'>"
+            f"<span style='color:{theme.muted}'>"
             f"{html.escape(winetricks) if winetricks else tr('brak')}"
             "</span>"
         )
         rows.append(
-            f"<span style='color:{'#42F5A7' if protontricks else '#FFB347'}'>"
+            f"<span style='color:{theme.success if protontricks else theme.warning}'>"
             f"{'●' if protontricks else '○'}</span> "
             f"<b>Protontricks</b> "
-            f"<span style='color:#69808B'>"
+            f"<span style='color:{theme.muted}'>"
             f"{html.escape(protontricks) if protontricks else tr('brak (opcjonalnie dla gier Steam)')}"
             "</span>"
         )
         rows.append(
-            f"<span style='color:#69808B'>"
+            f"<span style='color:{theme.muted}'>"
             f"{tr('Menedżer pakietów: {manager}', manager=package_manager() or tr('nie wykryto'))}"
             "</span>"
         )
@@ -2857,19 +3621,19 @@ class SettingsPage(QWidget):
         needs_install = bool(missing) or bool(install_groups)
         self.install_deps_button.setEnabled(needs_install)
         self.install_deps_button.setText(
-            tr("ZAINSTALUJ BRAKUJĄCE") if needs_install else tr("NARZĘDZIA OK")
+            tr("Zainstaluj brakujące") if needs_install else tr("Narzędzia OK")
         )
         has_m32 = bool(mangohud32_path())
         self.install_m32_button.setText(
-            tr("MANGOHUD 32-BIT: OK") if has_m32 else tr("ZAINSTALUJ MANGOHUD 32-BIT")
+            tr("MangoHud 32-bit: OK") if has_m32 else tr("Zainstaluj MangoHud 32-bit")
         )
         self.install_m32_button.setEnabled(
             not has_m32 and self._m32_process is None
         )
         self.install_winetricks_button.setText(
-            tr("WINETRICKS: OK")
+            tr("Winetricks: OK")
             if winetricks
-            else tr("ZAINSTALUJ WINETRICKS")
+            else tr("Zainstaluj Winetricks")
         )
         self.install_winetricks_button.setEnabled(
             not winetricks and self._winetricks_install_worker is None
@@ -3245,7 +4009,7 @@ class RunnerPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 24, 28, 20)
         outer.setSpacing(14)
-        kicker = QLabel(tr("RUNTIME // GITHUB"))
+        kicker = QLabel(tr("Silniki"))
         kicker.setObjectName("PageKicker")
         outer.addWidget(kicker)
         heading = QLabel(tr("Menedżer runnerów"))
@@ -3264,7 +4028,7 @@ class RunnerPage(QWidget):
         download_layout = QVBoxLayout(download_panel)
         download_layout.setContentsMargins(18, 16, 18, 16)
         download_layout.setSpacing(10)
-        title = QLabel(tr("POBIERZ NAJNOWSZY"))
+        title = QLabel(tr("Pobierz najnowszy"))
         title.setObjectName("SectionTitle")
         download_layout.addWidget(title)
         source_row = QHBoxLayout()
@@ -3273,17 +4037,17 @@ class RunnerPage(QWidget):
         self.source_combo.addItem(tr("Wine-GE  //  GloriousEggroll/wine-ge-custom"), "wine_ge")
         self.source_combo.currentIndexChanged.connect(self._reset_versions)
         source_row.addWidget(self.source_combo, 1)
-        self.versions_button = QPushButton(tr("POKAŻ / ODŚWIEŻ WERSJE"))
+        self.versions_button = QPushButton(tr("Pokaż / odśwież wersje"))
         self.versions_button.setObjectName("GhostButton")
         self.versions_button.clicked.connect(self._load_releases)
         source_row.addWidget(self.versions_button)
-        self.download_button = QPushButton(tr("POBIERZ WYBRANĄ"))
+        self.download_button = QPushButton(tr("Pobierz wybraną"))
         self.download_button.setObjectName("PrimaryButton")
         self.download_button.clicked.connect(self._download)
         source_row.addWidget(self.download_button)
         download_layout.addLayout(source_row)
         version_row = QHBoxLayout()
-        version_label = QLabel(tr("WERSJA"))
+        version_label = QLabel(tr("Wersja"))
         version_label.setObjectName("Muted")
         version_row.addWidget(version_label)
         self.version_combo = QComboBox()
@@ -3310,15 +4074,15 @@ class RunnerPage(QWidget):
         installed_layout.setContentsMargins(18, 16, 18, 16)
         installed_layout.setSpacing(10)
         installed_head = QHBoxLayout()
-        installed_title = QLabel(tr("ZAINSTALOWANE SILNIKI"))
+        installed_title = QLabel(tr("Zainstalowane silniki"))
         installed_title.setObjectName("SectionTitle")
         installed_head.addWidget(installed_title)
         installed_head.addStretch(1)
-        refresh = QPushButton(tr("ODŚWIEŻ"))
+        refresh = QPushButton(tr("Odśwież"))
         refresh.setObjectName("GhostButton")
         refresh.clicked.connect(self.refresh)
         installed_head.addWidget(refresh)
-        open_dir = QPushButton(tr("OTWÓRZ KATALOG"))
+        open_dir = QPushButton(tr("Otwórz katalog"))
         open_dir.setObjectName("GhostButton")
         open_dir.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(db.RUNNERS_DIR)))
@@ -3337,7 +4101,7 @@ class RunnerPage(QWidget):
         self.table.doubleClicked.connect(lambda _index: self._open_selected())
         installed_layout.addWidget(self.table, 1)
         actions = QHBoxLayout()
-        self.delete_button = QPushButton(tr("USUŃ WYBRANY"))
+        self.delete_button = QPushButton(tr("Usuń wybrany"))
         self.delete_button.setObjectName("DangerButton")
         self.delete_button.clicked.connect(self._delete_selected)
         actions.addWidget(self.delete_button)
@@ -3352,12 +4116,12 @@ class RunnerPage(QWidget):
         default_panel.setObjectName("Panel")
         default_layout = QHBoxLayout(default_panel)
         default_layout.setContentsMargins(18, 14, 18, 14)
-        default_label = QLabel(tr("DOMYŚLNY RUNNER DLA NOWYCH GIER"))
+        default_label = QLabel(tr("Domyślny runner dla nowych gier"))
         default_label.setObjectName("SectionTitle")
         default_layout.addWidget(default_label)
         self.default_combo = QComboBox()
         default_layout.addWidget(self.default_combo, 1)
-        use_button = QPushButton(tr("USTAW JAKO DOMYŚLNY"))
+        use_button = QPushButton(tr("Ustaw jako domyślny"))
         use_button.setObjectName("GhostButton")
         use_button.clicked.connect(self._set_default)
         default_layout.addWidget(use_button)
@@ -3558,7 +4322,7 @@ class MangoPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 24, 28, 20)
         outer.setSpacing(12)
-        kicker = QLabel(tr("OVERLAY // MANGOHUD"))
+        kicker = QLabel(tr("Nakładka MangoHud"))
         kicker.setObjectName("PageKicker")
         outer.addWidget(kicker)
         heading = QLabel(tr("Kreator nakładki"))
@@ -3585,7 +4349,7 @@ class MangoPage(QWidget):
         left.setContentsMargins(0, 0, 8, 0)
         left.setSpacing(12)
 
-        modules_panel, modules_layout = self._panel(tr("MODUŁY"), tr("Wybierz elementy HUD."))
+        modules_panel, modules_layout = self._panel(tr("Moduły"), tr("Wybierz elementy HUD."))
         self.module_checks: dict[str, QCheckBox] = {}
         for key, label in (
             ("show_fps", tr("FPS i frame time")),
@@ -3601,7 +4365,7 @@ class MangoPage(QWidget):
             modules_layout.addWidget(checkbox)
         left.addWidget(modules_panel)
 
-        layout_panel, layout_layout = self._panel(tr("POZYCJA"), tr("Zakotwiczenie panelu na ekranie."))
+        layout_panel, layout_layout = self._panel(tr("Pozycja"), tr("Zakotwiczenie panelu na ekranie."))
         self.position_combo = QComboBox()
         for label, value in (
             (tr("Lewy górny"), "top-left"),
@@ -3631,7 +4395,7 @@ class MangoPage(QWidget):
         layout_layout.addWidget(self._labeled_row(tr("Zaokrąglenie"), self.corners_spin))
         left.addWidget(layout_panel)
 
-        colors_panel, colors_layout = self._panel(tr("KOLORY"), tr("Akcent i paleta HUD."))
+        colors_panel, colors_layout = self._panel(tr("Kolory"), tr("Akcent i paleta HUD."))
         self.accent_button = ColorButton("#00E5FF", tr("Akcent"))
         self.text_button = ColorButton("#E6FAFF", tr("Tekst"))
         self.gpu_button = ColorButton("#42F5A7", tr("GPU"))
@@ -3650,11 +4414,11 @@ class MangoPage(QWidget):
         left.addWidget(colors_panel)
 
         save_row = QHBoxLayout()
-        reset = QPushButton(tr("RESET"))
+        reset = QPushButton(tr("Reset"))
         reset.setObjectName("GhostButton")
         reset.clicked.connect(self.reset)
         save_row.addWidget(reset)
-        save = QPushButton(tr("ZAPISZ NAKŁADKĘ"))
+        save = QPushButton(tr("Zapisz nakładkę"))
         save.setObjectName("PrimaryButton")
         save.clicked.connect(self.save)
         save_row.addWidget(save, 1)
@@ -3664,7 +4428,7 @@ class MangoPage(QWidget):
         columns.addWidget(left_scroll)
 
         right_panel, right = self._panel(
-            tr("PODGLĄD NA ŻYWO"),
+            tr("Podgląd na żywo"),
             tr("Przybliżony render; końcowy HUD rysuje MangoHud."),
         )
         self.preview = OverlayPreview()
@@ -3677,9 +4441,7 @@ class MangoPage(QWidget):
         right.addWidget(scaling_note)
         config_title = QLabel(tr("MANGOHUD_CONFIG"))
         config_title.setObjectName("Accent")
-        config_title.setStyleSheet(
-            "font-family:'DejaVu Sans Mono'; font-size:8pt; font-weight:700;"
-        )
+        config_title.setStyleSheet("font-size:8pt; font-weight:700;")
         right.addWidget(config_title)
         self.config_preview = QPlainTextEdit()
         self.config_preview.setReadOnly(True)
@@ -3813,7 +4575,7 @@ class LibraryPage(QWidget):
     big_picture_requested = pyqtSignal()
     toast = pyqtSignal(str)
 
-    VIEWS = {"grid": 0, "compact": 1, "minimal": 2}
+    VIEWS = {"grid": 0, "list": 1, "minimal": 2}
 
     def __init__(self, database: Database, parent=None) -> None:
         super().__init__(parent)
@@ -3821,91 +4583,115 @@ class LibraryPage(QWidget):
         self._games: list[dict[str, Any]] = []
         self._cover_cache: dict[str, QPixmap | None] = {}
         self._dirty_views: set[str] = set()
-        self._view_mode = self.db.get_setting("library_view", "grid")
-        if self._view_mode not in self.VIEWS:
-            self._view_mode = "grid"
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(220)
-        self._search_timer.timeout.connect(self.reload)
+        self._selected_id = 0
+        self._cards: dict[int, QWidget] = {}
+        self._filter = ""
+        self._source_filter: str | None = None
+        stored_view = self.db.get_setting("library_view", "grid")
+        if stored_view == "compact":
+            stored_view = "list"
+        if stored_view not in self.VIEWS:
+            stored_view = "grid"
+        self._view_mode = stored_view
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(28, 24, 28, 20)
-        outer.setSpacing(14)
+        outer.setContentsMargins(32, 26, 32, 22)
+        outer.setSpacing(16)
+
         header = QHBoxLayout()
         heading_box = QVBoxLayout()
-        heading_box.setSpacing(2)
-        kicker = QLabel(tr("LIBRARY // LOCAL"))
-        kicker.setObjectName("PageKicker")
-        heading_box.addWidget(kicker)
+        heading_box.setSpacing(3)
         heading = QLabel(tr("Biblioteka"))
         heading.setObjectName("PageTitle")
         heading_box.addWidget(heading)
+        self.stats_label = QLabel(tr("0 gier"))
+        self.stats_label.setObjectName("PageSubtitle")
+        heading_box.addWidget(self.stats_label)
         header.addLayout(heading_box)
         header.addStretch(1)
-        self.stats_label = QLabel(tr("0 GIER // 0 STEAM"))
-        self.stats_label.setObjectName("StatsPill")
-        header.addWidget(self.stats_label)
-        add = QPushButton(tr("＋  DODAJ GRĘ"))
-        add.setObjectName("PrimaryButton")
-        add.clicked.connect(self.add_requested.emit)
-        header.addWidget(add)
+        self.add_button = QPushButton(tr("Dodaj grę"))
+        self.add_button.setObjectName("PrimaryButton")
+        self.add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self.add_button, "plus", get_theme().on_accent, 16)
+        self.add_button.clicked.connect(self.add_requested.emit)
+        header.addWidget(self.add_button)
         outer.addLayout(header)
 
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(7)
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("Search")
-        self.search_edit.setPlaceholderText(tr("Szukaj gry...  (Ctrl+F)"))
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.textChanged.connect(lambda _text: self._search_timer.start())
-        toolbar.addWidget(self.search_edit, 1)
-        self.sync_button = QPushButton(tr("↻  SYNCHRONIZUJ STEAM"))
-        self.sync_button.setObjectName("GhostButton")
-        self.sync_button.clicked.connect(self.sync_requested.emit)
-        toolbar.addWidget(self.sync_button)
+        self.hero = HeroBanner()
+        self.hero.play_requested.connect(self.launch_requested.emit)
+        self.hero.edit_requested.connect(self.edit_requested.emit)
+        self.hero.menu_requested.connect(self.context_requested.emit)
+        outer.addWidget(self.hero)
+
+        self.toolbar_widget = QWidget()
+        toolbar = QHBoxLayout(self.toolbar_widget)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(8)
+        self.source_combo = QComboBox()
+        self.source_combo.addItem(tr("Wszystkie gry"), None)
+        self.source_combo.addItem(tr("Steam"), "steam")
+        self.source_combo.addItem(tr("Standalone"), "standalone")
+        self.source_combo.setMinimumWidth(140)
+        self.source_combo.currentIndexChanged.connect(self._source_selected)
+        toolbar.addWidget(self.source_combo)
+
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem(tr("Nazwa"), "name")
+        self.sort_combo.addItem(tr("FPS"), "fps")
+        self.sort_combo.addItem(tr("Skalowanie"), "scaling")
+        self.sort_combo.setMinimumWidth(140)
+        self.sort_combo.currentIndexChanged.connect(self._sort_selected)
+        toolbar.addWidget(self.sort_combo)
+        toolbar.addStretch(1)
+
         self.view_group = QButtonGroup(self)
         self.view_group.setExclusive(True)
         self.view_buttons: dict[str, QPushButton] = {}
-        for mode, label in (
-            ("grid", tr("SIATKA")),
-            ("compact", tr("KOMPAKT")),
-            ("minimal", tr("MINIMAL")),
+        for mode, icon_name, label in (
+            ("grid", "grid", tr("Siatka")),
+            ("list", "list", tr("Lista")),
         ):
-            button = QPushButton(label)
+            button = QPushButton()
             button.setObjectName("ViewButton")
             button.setCheckable(True)
-            button.setProperty("view", mode)
+            button.setToolTip(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            set_button_icon(button, icon_name, get_theme().muted, 16)
             button.clicked.connect(partial(self.set_view, mode))
             self.view_group.addButton(button)
             self.view_buttons[mode] = button
             toolbar.addWidget(button)
             if mode == self._view_mode:
                 button.setChecked(True)
-        self.console_button = QPushButton(tr("BIG PICTURE"))
-        self.console_button.setObjectName("ViewButton")
-        self.console_button.setCheckable(True)
-        self.console_button.setToolTip(tr("Pełnoekranowy tryb konsolowy z obsługą pada"))
-        self.console_button.clicked.connect(self.big_picture_requested.emit)
-        self.view_group.addButton(self.console_button)
-        toolbar.addWidget(self.console_button)
-        outer.addLayout(toolbar)
+
+        self.sync_button = QPushButton()
+        self.sync_button.setObjectName("IconButton")
+        self.sync_button.setToolTip(tr("Synchronizuj Steam"))
+        self.sync_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self.sync_button, "refresh", get_theme().muted, 18)
+        self.sync_button.clicked.connect(self.sync_requested.emit)
+        toolbar.addSpacing(4)
+        toolbar.addWidget(self.sync_button)
+        outer.addWidget(self.toolbar_widget)
 
         self.stack = QStackedWidget()
         self.grid_footer = QLabel("")
-        self.compact_footer = QLabel("")
         self.grid_layout: FlowLayout
-        self.compact_layout: QVBoxLayout
+        self.list_layout: QVBoxLayout
         self.grid_scroll, self.grid_layout = self._make_grid_view()
-        self.compact_scroll, self.compact_layout = self._make_compact_view()
+        self.list_scroll, self.list_layout = self._make_list_view()
         self.minimal_tree = QTreeWidget()
-        self.minimal_tree.setHeaderLabels([tr("GRA"), tr("ŹRÓDŁO"), tr("SKALOWANIE"), tr("FPS"), tr("RUNNER")])
+        self.minimal_tree.setHeaderLabels(
+            [tr("GRA"), tr("ŹRÓDŁO"), tr("SKALOWANIE"), tr("FPS"), tr("RUNNER")]
+        )
         self.minimal_tree.setRootIsDecorated(False)
         self.minimal_tree.setAlternatingRowColors(True)
         self.minimal_tree.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
-        self.minimal_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.minimal_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
         self.minimal_tree.customContextMenuRequested.connect(self._minimal_context)
         self.minimal_tree.itemDoubleClicked.connect(self._minimal_launch)
         self.minimal_tree.setColumnWidth(0, 330)
@@ -3914,7 +4700,7 @@ class LibraryPage(QWidget):
         self.minimal_tree.setColumnWidth(3, 70)
         self.minimal_tree.header().setStretchLastSection(True)
         self.stack.addWidget(self.grid_scroll)
-        self.stack.addWidget(self.compact_scroll)
+        self.stack.addWidget(self.list_scroll)
         self.stack.addWidget(self.minimal_tree)
         self.stack.setCurrentIndex(self.VIEWS[self._view_mode])
         outer.addWidget(self.stack, 1)
@@ -3925,12 +4711,12 @@ class LibraryPage(QWidget):
         scroll.setWidgetResizable(True)
         style_scroll_area(scroll)
         host = QWidget()
-        layout = FlowLayout(host, margin=2, h_spacing=16, v_spacing=16)
+        layout = FlowLayout(host, margin=2, h_spacing=18, v_spacing=18)
         host.setLayout(layout)
         scroll.setWidget(host)
         return scroll, layout
 
-    def _make_compact_view(self) -> tuple[QScrollArea, QVBoxLayout]:
+    def _make_list_view(self) -> tuple[QScrollArea, QVBoxLayout]:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         style_scroll_area(scroll)
@@ -3942,6 +4728,25 @@ class LibraryPage(QWidget):
         scroll.setWidget(host)
         return scroll, layout
 
+    # ------------------------------------------------------------- filtering
+    def set_filter(self, text: str) -> None:
+        text = (text or "").strip()
+        if text == self._filter:
+            return
+        self._filter = text
+        self.reload()
+
+    def filter_text(self) -> str:
+        return self._filter
+
+    def _source_selected(self) -> None:
+        self._source_filter = self.source_combo.currentData()
+        self.reload()
+
+    def _sort_selected(self) -> None:
+        self.reload()
+
+    # ---------------------------------------------------------------- views
     def set_view(self, mode: str) -> None:
         if mode not in self.VIEWS:
             return
@@ -3950,26 +4755,17 @@ class LibraryPage(QWidget):
         button = self.view_buttons.get(mode)
         if button is not None:
             button.setChecked(True)
-        self.console_button.setChecked(False)
         self.stack.setCurrentIndex(self.VIEWS[mode])
         if mode in self._dirty_views:
             self._rebuild_view(mode)
             self._dirty_views.discard(mode)
         if mode == "minimal":
-            self.toast.emit(tr("Widok minimalny: gry uruchomisz też z menu traya."))
+            self.toast.emit(
+                tr("Widok minimalny: gry uruchomisz też z menu traya.")
+            )
 
     def set_console_active(self, active: bool) -> None:
-        if active:
-            self.console_button.setChecked(True)
-        else:
-            self.console_button.setChecked(False)
-            button = self.view_buttons.get(self._view_mode)
-            if button is not None:
-                button.setChecked(True)
-
-    def focus_search(self) -> None:
-        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
-        self.search_edit.selectAll()
+        """Kept for compatibility; the console toggle lives in the top bar."""
 
     def _cover_for(self, game: dict[str, Any]) -> QPixmap | None:
         path_text = str(game.get("cover_path", "") or "")
@@ -3986,28 +4782,65 @@ class LibraryPage(QWidget):
             self._cover_cache[key] = None if pixmap.isNull() else pixmap
         return self._cover_cache[key]
 
+    # ---------------------------------------------------------------- reload
     def reload(self) -> None:
-        search = self.search_edit.text().strip()
-        self._games = self.db.list_games(search)
-        for game in self._games:
+        games = self.db.list_games(self._filter)
+        if self._source_filter == "steam":
+            games = [game for game in games if game.get("is_steam")]
+        elif self._source_filter == "standalone":
+            games = [game for game in games if not game.get("is_steam")]
+        for game in games:
             game["_bits"] = exe_bits(str(game.get("exe_path", "")))
+        sort_key = self.sort_combo.currentData()
+        if sort_key == "fps":
+            games.sort(key=lambda game: int(game.get("fps_limit", 0) or 0), reverse=True)
+        elif sort_key == "scaling":
+            games.sort(key=lambda game: str(game.get("scaling_mode", "")))
+        self._games = games
+
         stats = self.db.stats()
         self.stats_label.setText(
             tr(
-                "{games} GIER // {stores} ZE SKLEPÓW",
+                "{games} gier  ·  {stores} w sklepach",
                 games=stats["games"],
                 stores=stats.get("stores", 0),
             )
         )
+        ids = {int(game["id"]) for game in self._games}
+        if self._selected_id not in ids:
+            self._selected_id = int(self._games[0]["id"]) if self._games else 0
+        self._sync_hero()
         self._dirty_views = set(self.VIEWS)
         self._rebuild_view(self._view_mode)
         self._dirty_views.discard(self._view_mode)
 
+    def _sync_hero(self) -> None:
+        game = next(
+            (
+                item
+                for item in self._games
+                if int(item["id"]) == self._selected_id
+            ),
+            None,
+        )
+        self.hero.set_game(game, self._cover_for(game) if game else None)
+
+    def _select_game(self, game_id: int) -> None:
+        if game_id == self._selected_id:
+            return
+        self._selected_id = game_id
+        self._sync_hero()
+        for ident, widget in self._cards.items():
+            setter = getattr(widget, "set_selected", None)
+            if setter is not None:
+                setter(ident == game_id)
+
     def free_resources(self) -> None:
         """Drop cover pixmaps and card widgets while the game is running."""
         self.grid_layout.clear()
-        self._clear_layout(self.compact_layout)
+        self._clear_layout(self.list_layout)
         self.minimal_tree.clear()
+        self._cards.clear()
         self._cover_cache.clear()
         self._dirty_views = set(self.VIEWS)
 
@@ -4022,28 +4855,35 @@ class LibraryPage(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
-    def _empty_widget(self, text: str) -> QWidget:
+    def _empty_widget(self, text: str, hint_text: str = "") -> QWidget:
         frame = QFrame()
         frame.setObjectName("Panel")
-        frame.setMinimumHeight(180)
+        frame.setMinimumHeight(200)
         frame.setMinimumWidth(420)
         layout = QVBoxLayout(frame)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(6)
         title = QLabel(text)
-        title.setObjectName("SectionTitle")
+        title.setObjectName("EmptyTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
-        hint = QLabel(tr("Użyj „DODAJ GRĘ” lub zsynchronizuj bibliotekę Steam."))
-        hint.setObjectName("Muted")
+        hint = QLabel(
+            hint_text
+            or tr("Użyj „Dodaj grę” lub zsynchronizuj bibliotekę Steam.")
+        )
+        hint.setObjectName("EmptyHint")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(hint)
         return frame
 
     def _rebuild_view(self, mode: str) -> None:
+        self._cards.clear()
         if mode == "grid":
             self.grid_layout.clear()
             if not self._games:
-                self.grid_layout.addWidget(self._empty_widget(tr("Biblioteka jest pusta")))
+                self.grid_layout.addWidget(
+                    self._empty_widget(tr("Nie znaleziono gier"), tr("Zmień filtr lub dodaj nową grę."))
+                )
                 return
             for game in self._games:
                 card = GameCard(game, self._cover_for(game))
@@ -4051,12 +4891,17 @@ class LibraryPage(QWidget):
                 card.edit_requested.connect(self.edit_requested.emit)
                 card.delete_requested.connect(self.delete_requested.emit)
                 card.context_requested.connect(self.context_requested.emit)
+                card.selected.connect(self._select_game)
+                card.set_selected(int(game["id"]) == self._selected_id)
+                self._cards[int(game["id"])] = card
                 self.grid_layout.addWidget(card)
-        elif mode == "compact":
-            self._clear_layout(self.compact_layout)
+        elif mode == "list":
+            self._clear_layout(self.list_layout)
             if not self._games:
-                self.compact_layout.addWidget(self._empty_widget(tr("Biblioteka jest pusta")))
-                self.compact_layout.addStretch(1)
+                self.list_layout.addWidget(
+                    self._empty_widget(tr("Nie znaleziono gier"), tr("Zmień filtr lub dodaj nową grę."))
+                )
+                self.list_layout.addStretch(1)
                 return
             for game in self._games:
                 row = CompactGameRow(game, self._cover_for(game))
@@ -4064,8 +4909,11 @@ class LibraryPage(QWidget):
                 row.edit_requested.connect(self.edit_requested.emit)
                 row.delete_requested.connect(self.delete_requested.emit)
                 row.context_requested.connect(self.context_requested.emit)
-                self.compact_layout.addWidget(row)
-            self.compact_layout.addStretch(1)
+                row.selected.connect(self._select_game)
+                row.set_selected(int(game["id"]) == self._selected_id)
+                self._cards[int(game["id"])] = row
+                self.list_layout.addWidget(row)
+            self.list_layout.addStretch(1)
         else:
             self.minimal_tree.clear()
             if not self._games:
@@ -4075,12 +4923,12 @@ class LibraryPage(QWidget):
                 return
             for game in self._games:
                 source = (
-                    f"STEAM {game.get('steam_appid', '')}"
+                    f"Steam {game.get('steam_appid', '')}"
                     if game.get("is_steam")
-                    else "STANDALONE"
+                    else tr("Standalone")
                 )
                 if game.get("_bits"):
-                    source += f" / {game['_bits']}-BIT"
+                    source += f" / {game['_bits']}-bit"
                 runner = Path(str(game.get("runner_path", ""))).name or "AUTO"
                 item = QTreeWidgetItem(
                     [
@@ -4112,7 +4960,117 @@ class LibraryPage(QWidget):
 
     def set_sync_busy(self, busy: bool) -> None:
         self.sync_button.setEnabled(not busy)
-        self.search_edit.setEnabled(not busy)
+
+    def refresh_icons(self) -> None:
+        theme = get_theme()
+        refresh_button_icon(self.add_button, theme.on_accent)
+        refresh_button_icon(self.sync_button, theme.muted)
+        for button in self.view_buttons.values():
+            refresh_button_icon(button, theme.muted)
+        refresh_button_icon(self.hero.more, "#FFFFFF")
+        self.hero.update()
+
+
+class SteamCard(QFrame):
+    """Portrait cover tile for the Steam library."""
+
+    activated = pyqtSignal(str)
+    selected = pyqtSignal(str)
+
+    def __init__(
+        self, game: dict[str, Any], cover: QPixmap | None, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self.game = game
+        self.appid = str(game.get("appid", ""))
+        self.installed = bool(game.get("installed"))
+        self.setObjectName("Card")
+        self.setFixedWidth(168)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setSpacing(6)
+        self.cover = CoverView(str(game.get("name", "?")), cover, "STEAM")
+        self.cover.setFixedHeight(224)
+        layout.addWidget(self.cover)
+        title = QLabel(str(game.get("name", "")))
+        title.setObjectName("CardTitle")
+        title.setWordWrap(True)
+        title.setFixedHeight(36)
+        title.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        title.setToolTip(str(game.get("name", "")))
+        layout.addWidget(title)
+        status = QLabel(
+            tr("Zainstalowana") if self.installed else tr("W bibliotece")
+        )
+        status.setObjectName("CardMeta")
+        layout.addWidget(status)
+
+        self.overlay = QWidget(self)
+        self.overlay.setObjectName("CardOverlay")
+        self.overlay.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True
+        )
+        overlay_layout = QVBoxLayout(self.overlay)
+        overlay_layout.setContentsMargins(10, 10, 10, 10)
+        self.overlay_button = QPushButton()
+        self.overlay_button.setObjectName("OverlayPlay")
+        self.overlay_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.overlay_button.setToolTip(
+            tr("Uruchom grę") if self.installed else tr("Zainstaluj")
+        )
+        set_button_icon(
+            self.overlay_button,
+            "play" if self.installed else "download",
+            "#FFFFFF",
+            20,
+        )
+        self.overlay_button.clicked.connect(
+            lambda: self.activated.emit(self.appid)
+        )
+        overlay_layout.addStretch(1)
+        overlay_layout.addWidget(
+            self.overlay_button, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+        overlay_layout.addStretch(1)
+        self.overlay.hide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.overlay.setGeometry(self.cover.geometry())
+
+    def enterEvent(self, event: QEvent) -> None:  # noqa: N802
+        self.overlay.setGeometry(self.cover.geometry())
+        self.overlay.show()
+        self.overlay.raise_()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: N802
+        self.overlay.hide()
+        super().leaveEvent(event)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_cover(self, pixmap: QPixmap | None) -> None:
+        self.cover.set_pixmap(pixmap)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit(self.appid)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self.appid)
+        super().mouseDoubleClickEvent(event)
+
+
 class SteamPage(QWidget):
     """Owned Steam library with install/play actions."""
 
@@ -4128,97 +5086,93 @@ class SteamPage(QWidget):
         self.db = database
         self._games: list[dict[str, Any]] = []
         self._selected_appid = ""
+        self._cards: dict[str, SteamCard] = {}
+        self._filter = ""
         self._cover_worker: SteamCoverWorker | None = None
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(220)
-        self._search_timer.timeout.connect(self.reload)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(28, 24, 28, 20)
-        outer.setSpacing(14)
+        outer.setContentsMargins(32, 26, 32, 22)
+        outer.setSpacing(16)
+
         header = QHBoxLayout()
         heading_box = QVBoxLayout()
-        heading_box.setSpacing(2)
-        kicker = QLabel(tr("STEAM // LIBRARY"))
-        kicker.setObjectName("PageKicker")
-        heading_box.addWidget(kicker)
+        heading_box.setSpacing(3)
         heading = QLabel(tr("Biblioteka Steam"))
         heading.setObjectName("PageTitle")
         heading_box.addWidget(heading)
+        self.stats_label = QLabel(tr("0 gier"))
+        self.stats_label.setObjectName("PageSubtitle")
+        heading_box.addWidget(self.stats_label)
         header.addLayout(heading_box)
         header.addStretch(1)
-        self.stats_label = QLabel(tr("0 GIER // 0 ZAINSTALOWANYCH"))
-        self.stats_label.setObjectName("StatsPill")
-        header.addWidget(self.stats_label)
-        settings_button = QPushButton(tr("USTAWIENIA STEAM"))
+        settings_button = QPushButton(tr("Ustawienia Steam"))
         settings_button.setObjectName("GhostButton")
+        settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_button.clicked.connect(self.settings_requested.emit)
         header.addWidget(settings_button)
         outer.addLayout(header)
 
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(7)
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("Search")
-        self.search_edit.setPlaceholderText(tr("Szukaj w bibliotece Steam..."))
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.textChanged.connect(lambda _text: self._search_timer.start())
-        toolbar.addWidget(self.search_edit, 1)
+        toolbar.setSpacing(8)
         self.filter_combo = QComboBox()
         self.filter_combo.addItem(tr("Wszystkie gry"), None)
         self.filter_combo.addItem(tr("Zainstalowane"), 1)
         self.filter_combo.addItem(tr("Nie zainstalowane"), 0)
+        self.filter_combo.setMinimumWidth(160)
         self.filter_combo.currentIndexChanged.connect(self.reload)
         toolbar.addWidget(self.filter_combo)
-        self.sync_button = QPushButton(tr("↻  ODŚWIEŻ BIBLIOTEKĘ"))
-        self.sync_button.setObjectName("GhostButton")
+
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem(tr("Nazwa"), "name")
+        self.sort_combo.addItem(tr("Czas gry"), "playtime")
+        self.sort_combo.setMinimumWidth(150)
+        self.sort_combo.currentIndexChanged.connect(self.reload)
+        toolbar.addWidget(self.sort_combo)
+        toolbar.addStretch(1)
+
+        self.sync_button = QPushButton()
+        self.sync_button.setObjectName("IconButton")
+        self.sync_button.setToolTip(tr("Odśwież bibliotekę"))
+        self.sync_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(self.sync_button, "refresh", get_theme().muted, 18)
         self.sync_button.clicked.connect(self.sync_requested.emit)
         toolbar.addWidget(self.sync_button)
         outer.addLayout(toolbar)
 
         body = QHBoxLayout()
-        body.setSpacing(14)
-        self.table = QTreeWidget()
-        self.table.setObjectName("SteamTable")
-        self.table.setHeaderLabels([tr("GRA"), tr("CZAS GRY"), tr("ROZMIAR"), tr("STATUS")])
-        self.table.setRootIsDecorated(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
-        )
-        self.table.setIconSize(QSize(34, 46))
-        self.table.setColumnWidth(0, 350)
-        self.table.setColumnWidth(1, 130)
-        self.table.setColumnWidth(2, 100)
-        self.table.header().setStretchLastSection(True)
-        self.table.currentItemChanged.connect(self._selection_changed)
-        self.table.itemDoubleClicked.connect(self._launch_item)
-        body.addWidget(self.table, 1)
+        body.setSpacing(16)
+        self.grid_scroll = QScrollArea()
+        self.grid_scroll.setWidgetResizable(True)
+        style_scroll_area(self.grid_scroll)
+        host = QWidget()
+        self.grid_layout = FlowLayout(host, margin=2, h_spacing=18, v_spacing=18)
+        host.setLayout(self.grid_layout)
+        self.grid_scroll.setWidget(host)
+        body.addWidget(self.grid_scroll, 1)
 
         details = QFrame()
-        details.setObjectName("Panel")
-        details.setFixedWidth(350)
+        details.setObjectName("DetailsPane")
+        details.setFixedWidth(340)
         details_layout = QVBoxLayout(details)
-        details_layout.setContentsMargins(18, 16, 18, 16)
+        details_layout.setContentsMargins(22, 20, 22, 20)
         details_layout.setSpacing(9)
-        detail_kicker = QLabel(tr("WYBRANA GRA"))
-        detail_kicker.setObjectName("PageKicker")
+        detail_kicker = QLabel(tr("Wybrana gra"))
+        detail_kicker.setObjectName("SectionLabel")
         details_layout.addWidget(detail_kicker)
+
         self.cover = QLabel()
+        self.cover.setObjectName("SteamCover")
         self.cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cover.setFixedSize(220, 300)
-        self.cover.setObjectName("ConsoleCover")
+        self.cover.setFixedSize(200, 266)
         details_layout.addWidget(self.cover, 0, Qt.AlignmentFlag.AlignHCenter)
+
         self.title = QLabel(tr("Wybierz grę"))
         self.title.setObjectName("SectionTitle")
         self.title.setWordWrap(True)
         details_layout.addWidget(self.title)
+
         self.status = QLabel("")
-        self.status.setObjectName("Muted")
+        self.status.setObjectName("PageSubtitle")
         details_layout.addWidget(self.status)
         self.playtime = QLabel("")
         self.playtime.setObjectName("Muted")
@@ -4230,18 +5184,28 @@ class SteamPage(QWidget):
         )
         details_layout.addWidget(self.appid_label)
         details_layout.addStretch(1)
-        self.install_button = QPushButton(tr("ZAINSTALUJ"))
+
+        self.install_button = QPushButton(tr("Zainstaluj"))
         self.install_button.setObjectName("PrimaryButton")
+        self.install_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        set_button_icon(
+            self.install_button, "download", get_theme().on_accent, 16
+        )
         self.install_button.clicked.connect(self._install_current)
         details_layout.addWidget(self.install_button)
-        self.play_button = QPushButton(tr("▶  GRAJ"))
+
+        self.play_button = QPushButton(tr("▶   Graj"))
         self.play_button.setObjectName("PrimaryButton")
+        self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_button.clicked.connect(self._launch_current)
         details_layout.addWidget(self.play_button)
-        self.store_button = QPushButton(tr("OTWÓRZ W STEAM"))
+
+        self.store_button = QPushButton(tr("Otwórz w Steam"))
         self.store_button.setObjectName("GhostButton")
+        self.store_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.store_button.clicked.connect(self._store_current)
         details_layout.addWidget(self.store_button)
+
         body.addWidget(details)
         outer.addLayout(body, 1)
         self.reload()
@@ -4250,65 +5214,103 @@ class SteamPage(QWidget):
         value = self.filter_combo.currentData()
         return int(value) if value is not None else None
 
+    def set_filter(self, text: str) -> None:
+        text = (text or "").strip()
+        if text == self._filter:
+            return
+        self._filter = text
+        self.reload()
+
+    def filter_text(self) -> str:
+        return self._filter
+
     def reload(self) -> None:
-        search = self.search_edit.text().strip()
-        self._games = self.db.list_steam_library(search, self._filter_installed())
+        games = self.db.list_steam_library(self._filter, self._filter_installed())
+        if self.sort_combo.currentData() == "playtime":
+            games.sort(
+                key=lambda game: int(game.get("playtime_minutes", 0) or 0),
+                reverse=True,
+            )
+        else:
+            games.sort(
+                key=lambda game: str(game.get("name", "")).lower()
+            )
+        self._games = games
         stats = self.db.steam_library_stats()
         self.stats_label.setText(
             tr(
-                "{total} GIER // {installed} ZAINSTALOWANYCH",
+                "{total} gier  ·  {installed} zainstalowanych",
                 total=stats["total"],
                 installed=stats["installed"],
             )
         )
-        current = self._selected_appid
-        self.table.blockSignals(True)
-        self.table.clear()
-        selected_item: QTreeWidgetItem | None = None
-        for game in self._games:
-            item = QTreeWidgetItem(
-                [
-                    str(game.get("name", "")),
-                    self._playtime_text(int(game.get("playtime_minutes", 0))),
-                    human_bytes(int(game.get("size", 0) or 0))
-                    if int(game.get("size", 0) or 0) > 0
-                    else "—",
-                    tr("ZAINSTALOWANA") if game.get("installed") else tr("W BIBLIOTECE"),
-                ]
+
+        self.grid_layout.clear()
+        self._cards.clear()
+        if not games:
+            self.grid_layout.addWidget(
+                self._empty_widget(tr("Brak gier w bibliotece Steam"))
             )
-            item.setData(0, Qt.ItemDataRole.UserRole, str(game.get("appid", "")))
-            cover = Path(str(game.get("cover_path", "") or "")).expanduser()
-            if cover.is_file():
-                icon = QIcon(str(cover))
-                if not icon.isNull():
-                    item.setIcon(0, icon)
-            item.setToolTip(0, str(game.get("name", "")))
-            item.setToolTip(3, str(game.get("appid", "")))
-            self.table.addTopLevelItem(item)
-            if current and str(game.get("appid", "")) == current:
-                selected_item = item
-        self.table.blockSignals(False)
-        if selected_item is not None:
-            self.table.setCurrentItem(selected_item)
-        elif self.table.topLevelItemCount():
-            self.table.setCurrentItem(self.table.topLevelItem(0))
+        for game in games:
+            appid = str(game.get("appid", ""))
+            card = SteamCard(game, self._cover_pixmap(game))
+            card.selected.connect(self._select_appid)
+            card.activated.connect(self._activate_appid)
+            card.set_selected(appid == self._selected_appid)
+            self._cards[appid] = card
+            self.grid_layout.addWidget(card)
+
+        appids = [str(game.get("appid", "")) for game in games]
+        if self._selected_appid not in appids:
+            self._selected_appid = appids[0] if appids else ""
+        if self._selected_appid:
+            self._select_appid(self._selected_appid)
         else:
-            self._selected_appid = ""
-            self.title.setText(tr("Brak pobranej biblioteki Steam"))
-            self.status.setText(
-                tr(
-                    "Skonfiguruj Steam Web API key w Ustawieniach → Steam, "
-                    "a następnie odśwież bibliotekę."
-                )
+            self._show_empty_details()
+
+    def _empty_widget(self, text: str) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("Panel")
+        frame.setMinimumHeight(200)
+        frame.setMinimumWidth(360)
+        layout = QVBoxLayout(frame)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(6)
+        title = QLabel(text)
+        title.setObjectName("EmptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        hint = QLabel(
+            tr("Skonfiguruj Steam Web API key w Ustawieniach, aby pobrać bibliotekę.")
+        )
+        hint.setObjectName("EmptyHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return frame
+
+    def _cover_pixmap(self, game: dict[str, Any]) -> QPixmap | None:
+        path = Path(str(game.get("cover_path", "") or "")).expanduser()
+        if path.is_file():
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                return pixmap
+        return None
+
+    def _show_empty_details(self) -> None:
+        self.title.setText(tr("Brak pobranej biblioteki Steam"))
+        self.status.setText(
+            tr(
+                "Skonfiguruj Steam Web API key w Ustawieniach → Steam, "
+                "a następnie odśwież bibliotekę."
             )
-            self.playtime.setText("")
-            self.appid_label.setText("")
-            self.cover.setPixmap(app_icon(160).pixmap(160, 160))
-            self.install_button.hide()
-            self.play_button.hide()
-            self.store_button.hide()
-        if self.table.topLevelItemCount():
-            self._selection_changed(self.table.currentItem(), None)
+        )
+        self.playtime.setText("")
+        self.appid_label.setText("")
+        self.cover.setPixmap(app_icon(160).pixmap(160, 160))
+        self.install_button.hide()
+        self.play_button.hide()
+        self.store_button.hide()
 
     def _playtime_text(self, minutes: int) -> str:
         if minutes <= 0:
@@ -4318,49 +5320,55 @@ class SteamPage(QWidget):
             return tr("{hours} h {minutes} min", hours=hours, minutes=mins)
         return tr("{minutes} min", minutes=mins)
 
-    def _selected_game(self) -> dict[str, Any] | None:
-        item = self.table.currentItem()
-        if item is None:
-            return None
-        appid = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
-        return self.db.get_steam_library_game(appid) if appid else None
-
-    def _selection_changed(
-        self, current: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None
-    ) -> None:
-        if current is None:
-            return
-        appid = str(current.data(0, Qt.ItemDataRole.UserRole) or "")
-        game = self.db.get_steam_library_game(appid)
+    def _select_appid(self, appid: str) -> None:
+        game = self.db.get_steam_library_game(str(appid))
         if game is None:
             return
-        self._selected_appid = appid
+        self._selected_appid = str(appid)
         self.title.setText(str(game.get("name", "")))
         installed = bool(game.get("installed"))
         self.status.setText(
-            tr("Zainstalowana w Steam") if installed else tr("W bibliotece Steam")
+            tr("Zainstalowana w Steam")
+            if installed
+            else tr("W bibliotece Steam")
         )
         self.playtime.setText(
-            tr("Czas gry: {time}", time=self._playtime_text(int(game.get("playtime_minutes", 0))))
+            tr(
+                "Czas gry: {time}",
+                time=self._playtime_text(int(game.get("playtime_minutes", 0))),
+            )
         )
         self.appid_label.setText(tr("AppID: {appid}", appid=appid))
         self.install_button.setVisible(not installed)
         self.play_button.setVisible(installed)
         self.store_button.show()
-        cover = Path(str(game.get("cover_path", "") or "")).expanduser()
-        if cover.is_file():
-            icon = QIcon(str(cover))
-            if not icon.isNull():
-                self.cover.setPixmap(
-                    icon.pixmap(self.cover.size()).scaled(
-                        self.cover.size(),
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-                return
+        for ident, card in self._cards.items():
+            card.set_selected(ident == self._selected_appid)
+
+        pixmap = self._cover_pixmap(game)
+        if pixmap is not None:
+            self._set_detail_cover(pixmap)
+            return
         self.cover.setPixmap(app_icon(160).pixmap(160, 160))
         self._load_cover(appid)
+
+    def _set_detail_cover(self, pixmap: QPixmap) -> None:
+        self.cover.setPixmap(
+            pixmap.scaled(
+                self.cover.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def _activate_appid(self, appid: str) -> None:
+        game = self.db.get_steam_library_game(str(appid))
+        if game is None:
+            return
+        if game.get("installed"):
+            self.launch_requested.emit(str(appid))
+        else:
+            self.install_requested.emit(str(appid))
 
     def _load_cover(self, appid: str) -> None:
         if self._cover_worker is not None:
@@ -4376,23 +5384,13 @@ class SteamPage(QWidget):
             worker.deleteLater()
         if path:
             self.db.set_steam_cover(appid, path)
-            for index in range(self.table.topLevelItemCount()):
-                item = self.table.topLevelItem(index)
-                if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == appid:
-                    icon = QIcon(path)
-                    if not icon.isNull():
-                        item.setIcon(0, icon)
-                    break
-            if appid == self._selected_appid:
-                icon = QIcon(path)
-                if not icon.isNull():
-                    self.cover.setPixmap(
-                        icon.pixmap(self.cover.size()).scaled(
-                            self.cover.size(),
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                    )
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                card = self._cards.get(appid)
+                if card is not None:
+                    card.set_cover(pixmap)
+                if appid == self._selected_appid:
+                    self._set_detail_cover(pixmap)
         if appid != self._selected_appid and self._selected_appid:
             game = self.db.get_steam_library_game(self._selected_appid)
             if game and not game.get("cover_path"):
@@ -4401,31 +5399,22 @@ class SteamPage(QWidget):
     def update_cover(self, appid: str, path: str) -> None:
         if not path:
             return
-        icon = QIcon(path)
-        if icon.isNull():
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
             return
-        for index in range(self.table.topLevelItemCount()):
-            item = self.table.topLevelItem(index)
-            if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == appid:
-                item.setIcon(0, icon)
-                break
+        card = self._cards.get(str(appid))
+        if card is not None:
+            card.set_cover(pixmap)
         if appid == self._selected_appid:
-            self.cover.setPixmap(
-                icon.pixmap(self.cover.size()).scaled(
-                    self.cover.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+            self._set_detail_cover(pixmap)
 
     def update_size(self, appid: str, size: int) -> None:
-        for index in range(self.table.topLevelItemCount()):
-            item = self.table.topLevelItem(index)
-            if str(item.data(0, Qt.ItemDataRole.UserRole) or "") == appid:
-                item.setText(
-                    2, human_bytes(int(size or 0)) if int(size or 0) > 0 else "—"
-                )
-                break
+        """Sizes are not shown on Steam tiles; kept for the shared store API."""
+
+    def _selected_game(self) -> dict[str, Any] | None:
+        if not self._selected_appid:
+            return None
+        return self.db.get_steam_library_game(self._selected_appid)
 
     def _install_current(self) -> None:
         game = self._selected_game()
@@ -4442,23 +5431,13 @@ class SteamPage(QWidget):
         if game is not None:
             self.store_requested.emit(str(game["appid"]))
 
-    def _launch_item(self, item: QTreeWidgetItem) -> None:
-        appid = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
-        game = self.db.get_steam_library_game(appid) if appid else None
-        if game is None:
-            return
-        if game.get("installed"):
-            self.launch_requested.emit(appid)
-        else:
-            self.install_requested.emit(appid)
-
     def set_sync_busy(self, busy: bool) -> None:
         self.sync_button.setEnabled(not busy)
-        self.search_edit.setEnabled(not busy)
 
-    def focus_search(self) -> None:
-        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
-        self.search_edit.selectAll()
+    def refresh_icons(self) -> None:
+        theme = get_theme()
+        refresh_button_icon(self.sync_button, theme.muted)
+        refresh_button_icon(self.install_button, theme.on_accent)
 
     def shutdown(self) -> None:
         if self._cover_worker is not None:
@@ -5421,7 +6400,7 @@ class MainWindow(QMainWindow):
         self._build_tray()
         self._build_hotkey()
         self._restore_geometry()
-        self._refresh_all()
+        self._refresh_all(notify=False)
         self._update_sidebar_state()
         QTimer.singleShot(1200, self._prefetch_cached_assets)
 
@@ -5434,62 +6413,26 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        self.titlebar = TitleBar(self)
-        self.titlebar.menu_requested.connect(self._show_app_menu)
-        root_layout.addWidget(self.titlebar)
+        self.topbar = TopBar(self)
+        self.topbar.menu_requested.connect(self._show_app_menu)
+        self.topbar.refresh_requested.connect(self._refresh_all)
+        self.topbar.console_requested.connect(self.open_console)
+        self.topbar.search_changed.connect(self._search_changed)
+        root_layout.addWidget(self.topbar)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(196)
-        side = QVBoxLayout(sidebar)
-        side.setContentsMargins(14, 20, 14, 16)
-        side.setSpacing(7)
-        caption = QLabel(tr("NAWIGACJA"))
-        caption.setObjectName("SidebarCaption")
-        side.addWidget(caption)
-        self.nav_group = QButtonGroup(self)
-        self.nav_group.setExclusive(True)
-        menu_items = (
-            (tr("01   BIBLIOTEKA"), 0),
-            (tr("02   SKLEPY"), 1),
-            (tr("03   USTAWIENIA"), 2),
-            (tr("04   RUNNERY"), 3),
-            (tr("05   MANGOHUD"), 4),
-        )
-        for label, index in menu_items:
-            button = QPushButton(label)
-            button.setObjectName("NavButton")
-            button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            if index == 0:
-                button.setChecked(True)
-            self.nav_group.addButton(button, index)
-            side.addWidget(button)
-        side.addStretch(1)
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("color:#222A31;")
-        side.addWidget(separator)
-        local = QLabel(tr("LOCAL // SQLITE"))
-        local.setObjectName("SidebarCaption")
-        side.addWidget(local)
-        self.sidebar_live = QLabel(tr("●  MINIMIZE: ON"))
-        self.sidebar_live.setObjectName("SidebarLive")
-        side.addWidget(self.sidebar_live)
-        db_hint = QLabel(str(db.CONFIG_DIR))
-        db_hint.setObjectName("SidebarCaption")
-        db_hint.setWordWrap(True)
-        db_hint.setToolTip(str(db.CONFIG_DIR))
-        side.addWidget(db_hint)
-        body.addWidget(sidebar)
+        self.nav_rail = NavRail(self)
+        body.addWidget(self.nav_rail)
 
         self.stack = QStackedWidget()
         self.library_page = LibraryPage(self.db)
         self.steam_page = SteamPage(self.db)
         self.stores_page = store_ui.StoresPage(self.db, self.steam_page)
+        self.stores_page.tabs.currentChanged.connect(
+            lambda _index: self._sync_topbar_search()
+        )
         self.settings_page = SettingsPage(self.db)
         self.runner_page = RunnerPage(self.db)
         self.mango_page = MangoPage(self.db)
@@ -5504,7 +6447,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self.stack, 1)
         root_layout.addLayout(body, 1)
 
-        self.nav_group.idClicked.connect(self._switch_page)
+        self.nav_rail.page_selected.connect(self._switch_page)
         self.library_page.launch_requested.connect(self.start_game)
         self.library_page.edit_requested.connect(self.edit_game)
         self.library_page.delete_requested.connect(self.delete_game)
@@ -5558,29 +6501,89 @@ class MainWindow(QMainWindow):
 
         status_bar = QFrame()
         status_bar.setObjectName("StatusBar")
-        status_bar.setFixedHeight(32)
+        status_bar.setFixedHeight(28)
         status_layout = QHBoxLayout(status_bar)
-        status_layout.setContentsMargins(12, 4, 6, 4)
+        status_layout.setContentsMargins(14, 3, 8, 3)
         status_layout.setSpacing(10)
-        self.status_label = QLabel(tr("GOTOWY"))
+        self.status_label = QLabel(tr("Gotowy"))
         self.status_label.setObjectName("StatusText")
         status_layout.addWidget(self.status_label, 1)
-        self.ghost_badge = QLabel(tr("MINIMIZE // ON"))
+        self.ghost_badge = QLabel(tr("Minimalizacja: wł."))
         self.ghost_badge.setObjectName("GhostBadge")
         status_layout.addWidget(self.ghost_badge)
         grip = QSizeGrip(status_bar)
         status_layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom)
         root_layout.addWidget(status_bar)
+        self._sync_topbar_search()
+
+    def _search_changed(self, text: str) -> None:
+        self._pending_search = text
+        if not hasattr(self, "_search_timer"):
+            self._search_timer = QTimer(self)
+            self._search_timer.setSingleShot(True)
+            self._search_timer.setInterval(200)
+            self._search_timer.timeout.connect(self._apply_search)
+        self._search_timer.start()
+
+    def _store_tab_widget(self) -> QWidget:
+        return self.stores_page.tabs.currentWidget()
+
+    def _store_filter_text(self) -> str:
+        widget = self._store_tab_widget()
+        if widget is self.steam_page:
+            return self.steam_page.filter_text()
+        search = getattr(widget, "search_edit", None)
+        return search.text() if search is not None else ""
+
+    def _apply_store_filter(self, text: str) -> None:
+        widget = self._store_tab_widget()
+        if widget is self.steam_page:
+            self.steam_page.set_filter(text)
+            return
+        search = getattr(widget, "search_edit", None)
+        if search is not None and search.text() != text:
+            search.setText(text)
+
+    def _apply_search(self) -> None:
+        text = getattr(self, "_pending_search", "")
+        index = self.stack.currentIndex()
+        if index == 0:
+            self.library_page.set_filter(text)
+        elif index == 1:
+            self._apply_store_filter(text)
+
+    def _sync_topbar_search(self) -> None:
+        if not hasattr(self, "topbar"):
+            return
+        if hasattr(self, "_search_timer"):
+            self._search_timer.stop()
+        index = self.stack.currentIndex()
+        if index == 0:
+            self.topbar.search.setEnabled(True)
+            self.topbar.set_search_placeholder(tr("Szukaj w bibliotece..."))
+            self.topbar.set_search_text(self.library_page.filter_text())
+        elif index == 1:
+            self.topbar.search.setEnabled(True)
+            self.topbar.set_search_placeholder(tr("Szukaj w sklepach..."))
+            self.topbar.set_search_text(self._store_filter_text())
+        else:
+            self.topbar.search.setEnabled(False)
+            self.topbar.set_search_placeholder(tr("Szukaj..."))
+            self.topbar.set_search_text("")
 
     def _switch_page(self, index: int) -> None:
         if 0 <= index < self.stack.count():
+            if hasattr(self, "_search_timer"):
+                self._search_timer.stop()
             self.stack.setCurrentIndex(index)
+            self._sync_topbar_search()
+
 
     def _build_shortcuts(self) -> None:
         shortcuts = (
             ("Ctrl+N", self.add_game),
             ("Ctrl+R", self._refresh_all),
-            ("Ctrl+F", self.library_page.focus_search),
+            ("Ctrl+F", self.topbar.focus_search),
             ("F5", self.sync_steam),
             ("Ctrl+Shift+A", lambda: self.sync_store("amazon")),
             ("Ctrl+L", self.show_last_run_log),
@@ -5638,16 +6641,17 @@ class MainWindow(QMainWindow):
         self.app_menu.addAction(quit_action)
 
     def _show_app_menu(self) -> None:
-        position = self.titlebar.mapToGlobal(
-            QPoint(max(0, self.titlebar.width() - 130), 50)
-        )
+        button = self.topbar.menu_button
+        position = button.mapToGlobal(QPoint(0, button.height() + 6))
         self.app_menu.exec(position)
 
     def _show_minimal(self) -> None:
-        self.library_page.search_edit.clear()
+        self.topbar.set_search_text("")
+        self.library_page.set_filter("")
         self.library_page.set_view("minimal")
-        self.nav_group.button(0).setChecked(True)
+        self.nav_rail.set_current(0)
         self.stack.setCurrentIndex(0)
+        self._sync_topbar_search()
         self.show_window()
 
     # ------------------------------------------------------------------- tray
@@ -5693,14 +6697,12 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(icon_label)
         text_box = QVBoxLayout()
         text_box.setSpacing(1)
-        title = QLabel(tr("BOOSTLAYER"))
+        title = QLabel(tr("Boostlayer"))
         title.setStyleSheet(
-            "color:#00E5FF; font-weight:800; letter-spacing:2px; font-size:10pt;"
+            f"color:{get_theme().text}; font-weight:800; font-size:10pt;"
         )
-        subtitle = QLabel(tr("GAME RUNTIME CONTROL"))
-        subtitle.setStyleSheet(
-            "color:#6C808C; font-family:'DejaVu Sans Mono'; font-size:7pt;"
-        )
+        subtitle = QLabel(tr("Wine / Proton launcher"))
+        subtitle.setStyleSheet(f"color:{get_theme().muted}; font-size:8pt;")
         text_box.addWidget(title)
         text_box.addWidget(subtitle)
         header_layout.addLayout(text_box)
@@ -5738,7 +6740,7 @@ class MainWindow(QMainWindow):
         gamemode.setEnabled(False)
 
         menu.addSeparator()
-        section = menu.addAction(tr("BIBLIOTEKA"))
+        section = menu.addAction(tr("Biblioteka"))
         section.setEnabled(False)
         games = self.db.list_games()
         for game in games[:8]:
@@ -5778,8 +6780,9 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.quit_app)
 
     def _open_settings_page(self) -> None:
-        self.nav_group.button(2).setChecked(True)
+        self.nav_rail.set_current(2)
         self.stack.setCurrentIndex(2)
+        self._sync_topbar_search()
         self.show_window()
 
     def _open_steam_settings(self) -> None:
@@ -5905,7 +6908,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         QTimer.singleShot(
             4500,
-            lambda: self.status_label.setText(tr("GOTOWY"))
+            lambda: self.status_label.setText(tr("Gotowy"))
             if generation == self._toast_generation
             else None,
         )
@@ -5913,17 +6916,17 @@ class MainWindow(QMainWindow):
     def _update_sidebar_state(self) -> None:
         minimize = self.db.get_bool("ghost_mode", True)
         if self._active_process is not None:
-            self.sidebar_live.setText(tr("●  GAME: RUNNING"))
-            self.ghost_badge.setText(tr("MINIMIZE // GAME ACTIVE"))
+            self.nav_rail.set_status(tr("Gra uruchomiona"), True)
+            self.ghost_badge.setText(tr("Gra aktywna"))
         else:
-            self.sidebar_live.setText(
-                tr("●  MINIMIZE: ON") if minimize else tr("○  MINIMIZE: OFF")
-            )
+            self.nav_rail.set_status(tr("Gotowy"))
             self.ghost_badge.setText(
-                tr("MINIMIZE // ON") if minimize else tr("MINIMIZE // OFF")
+                tr("Minimalizacja: wł.")
+                if minimize
+                else tr("Minimalizacja: wył.")
             )
 
-    def _refresh_all(self) -> None:
+    def _refresh_all(self, notify: bool = True) -> None:
         self.library_page.reload()
         self.stores_page.reload()
         for store_id, adapter in stores.STORES.items():
@@ -5939,7 +6942,8 @@ class MainWindow(QMainWindow):
             self.console.reload()
         self._update_sidebar_state()
         self._refresh_tray_menu()
-        self.toast(tr("Biblioteka odświeżona."))
+        if notify:
+            self.toast(tr("Biblioteka odświeżona."))
 
     def _install_qt_translations(self) -> None:
         """Load Qt's own translations for standard dialog buttons."""
@@ -5988,9 +6992,9 @@ class MainWindow(QMainWindow):
             if shortcut is getattr(self, "_hotkey_shortcut", None):
                 continue
             shortcut.deleteLater()
-        if getattr(self, "nav_group", None) is not None:
-            self.nav_group.deleteLater()
-            self.nav_group = None
+        if getattr(self, "nav_rail", None) is not None:
+            self.nav_rail.deleteLater()
+            self.nav_rail = None
         if getattr(self, "stores_page", None) is not None:
             self._cancel_all_asset_workers()
             self.stores_page.shutdown()
@@ -6002,13 +7006,12 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_shortcuts()
         self._build_tray()
-        self._refresh_all()
+        self._refresh_all(notify=False)
         self._update_sidebar_state()
         if 0 <= current_page < self.stack.count():
             self.stack.setCurrentIndex(current_page)
-            button = self.nav_group.button(current_page)
-            if button is not None:
-                button.setChecked(True)
+            self.nav_rail.set_current(current_page)
+        self._sync_topbar_search()
         self.toast(tr("Język: {name}", name=LANGUAGES[get_language()]))
 
     def _on_settings_changed(self) -> None:
@@ -6023,6 +7026,7 @@ class MainWindow(QMainWindow):
         theme = set_theme(key)
         app = QApplication.instance()
         if app is not None:
+            apply_app_palette()
             app.setStyleSheet(build_qss(QSS))
             app.setWindowIcon(app_icon())
         self.setWindowIcon(app_icon())
@@ -6035,7 +7039,11 @@ class MainWindow(QMainWindow):
             self.console.setWindowIcon(app_icon())
             self.console.reload()
         self._refresh_tray_menu()
-        self.titlebar.update()
+        self.topbar.refresh_icons()
+        self.nav_rail.refresh_icons()
+        self.library_page.refresh_icons()
+        self.steam_page.refresh_icons()
+        self.settings_page._refresh_deps()
         log.info("Theme applied: %s", theme.name)
 
     # ---------------------------------------------------------------- library
@@ -6303,7 +7311,7 @@ class MainWindow(QMainWindow):
         worker = self._steam_library_worker
         self._steam_library_worker = None
         self.steam_page.set_sync_busy(False)
-        self.status_label.setText(tr("GOTOWY"))
+        self.status_label.setText(tr("Gotowy"))
         if worker is not None:
             worker.deleteLater()
 
@@ -8817,7 +9825,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         process.terminate()
-        self.status_label.setText(tr("ZATRZYMYWANIE GRY..."))
+        self.status_label.setText(tr("Zatrzymywanie gry..."))
 
     # -------------------------------------------------------------- maintenance
     def show_last_run_log(self) -> None:
@@ -8879,20 +9887,24 @@ class MainWindow(QMainWindow):
         )
 
     def _about(self) -> None:
+        theme = get_theme()
+        description = tr(
+            "<h2 style='color:#00E5FF'>{app} {version}</h2>"
+            "<p>Minimalistyczny launcher standalone i wrapper Wine/Proton.</p>"
+            "<p><b>Runtime:</b> Python stdlib + PyQt6<br>"
+            "<b>Dane:</b> SQLite3<br>"
+            "<b>Łańcuch:</b> GameMode → MangoHud → Gamescope → Wine → Gra</p>"
+            "<p style='color:#71858F'>Po starcie gry Boostlayer minimalizuje "
+            "się do paska zadań i pozostaje w pamięci. Ctrl+Alt+S przywraca "
+            "lub chowa okno.</p>",
+            app=APP_NAME,
+            version=APP_VERSION,
+        )
         QMessageBox.about(
             self,
             tr("O {app}", app=APP_NAME),
-            tr(
-                "<h2 style='color:#00E5FF'>{app} {version}</h2>"
-                "<p>Minimalistyczny launcher standalone i wrapper Wine/Proton.</p>"
-                "<p><b>Runtime:</b> Python stdlib + PyQt6<br>"
-                "<b>Dane:</b> SQLite3<br>"
-                "<b>Łańcuch:</b> GameMode → MangoHud → Gamescope → Wine → Gra</p>"
-                "<p style='color:#71858F'>Po starcie gry Boostlayer minimalizuje "
-                "się do paska zadań i pozostaje w pamięci. Ctrl+Alt+S przywraca "
-                "lub chowa okno.</p>",
-                app=APP_NAME,
-                version=APP_VERSION,
+            description.replace("#00E5FF", theme.accent).replace(
+                "#71858F", theme.muted
             ),
         )
 
@@ -9108,6 +10120,7 @@ def main() -> int:
     database = Database()
     set_language(database.get_setting("language", DEFAULT_LANGUAGE))
     set_theme(database.get_setting("theme", DEFAULT_THEME))
+    apply_app_palette()
     app.setWindowIcon(app_icon())
     app.setStyleSheet(build_qss(QSS))
     app.aboutToQuit.connect(database.close)

@@ -147,7 +147,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "prefetch_covers": "1",
     "prefetch_sizes": "1",
     "global_hotkey": "1",
-    "theme": "cyber",
+    "theme": "epic",
     "language": "pl",
     "console_monitor": "0",
     "mangohud_profile": json.dumps(DEFAULT_MANGOHUD),

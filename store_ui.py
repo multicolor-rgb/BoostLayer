@@ -103,10 +103,10 @@ class InstallDirDialog(QDialog):
         ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
         cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
         if ok:
-            ok.setText(tr("ZAINSTALUJ TUTAJ"))
+            ok.setText(tr("Zainstaluj tutaj"))
             ok.setObjectName("PrimaryButton")
         if cancel:
-            cancel.setText(tr("ANULUJ"))
+            cancel.setText(tr("Anuluj"))
             cancel.setObjectName("GhostButton")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
@@ -217,7 +217,7 @@ class StoreProgressDialog(QDialog):
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(500)
         outer.addWidget(self.log_view, 1)
-        self.cancel_button = QPushButton(tr("ANULUJ"))
+        self.cancel_button = QPushButton(tr("Anuluj"))
         self.cancel_button.setObjectName("GhostButton")
         self.cancel_button.clicked.connect(self._cancel_clicked)
         outer.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignRight)
@@ -248,14 +248,14 @@ class StoreProgressDialog(QDialog):
 
     def set_running(self, running: bool) -> None:
         self._running = running
-        self.cancel_button.setText(tr("ANULUJ") if running else tr("ZAMKNIJ"))
+        self.cancel_button.setText(tr("Anuluj") if running else tr("Zamknij"))
         self.cancel_button.setEnabled(True)
 
     def _cancel_clicked(self) -> None:
         if self._running:
             self.cancelled.emit()
             self.cancel_button.setEnabled(False)
-            self.cancel_button.setText(tr("ANULOWANIE..."))
+            self.cancel_button.setText(tr("Anulowanie..."))
         else:
             self.accept()
 
@@ -316,7 +316,7 @@ class StoreLoginDialog(QDialog):
         self.url_edit.setReadOnly(True)
         self.url_edit.setPlaceholderText(tr("Przygotowuję adres logowania..."))
         url_row.addWidget(self.url_edit, 1)
-        self.open_button = QPushButton(tr("OTWÓRZ STRONĘ LOGOWANIA"))
+        self.open_button = QPushButton(tr("Otwórz stronę logowania"))
         self.open_button.setObjectName("GhostButton")
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self._open_url)
@@ -342,11 +342,11 @@ class StoreLoginDialog(QDialog):
         self.ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
         if self.ok_button:
-            self.ok_button.setText(tr("ZALOGUJ"))
+            self.ok_button.setText(tr("Zaloguj"))
             self.ok_button.setObjectName("PrimaryButton")
             self.ok_button.setEnabled(False)
         if cancel_button:
-            cancel_button.setText(tr("ANULUJ"))
+            cancel_button.setText(tr("Anuluj"))
             cancel_button.setObjectName("GhostButton")
         buttons.accepted.connect(self._submit)
         buttons.rejected.connect(self.reject)
@@ -487,7 +487,7 @@ class StorePage(QWidget):
         header = QHBoxLayout()
         heading_box = QVBoxLayout()
         heading_box.setSpacing(2)
-        kicker = QLabel(tr("{store} // LIBRARY", store=adapter.label))
+        kicker = QLabel(tr("{store}", store=adapter.label))
         kicker.setObjectName("PageKicker")
         heading_box.addWidget(kicker)
         heading = QLabel(tr("Biblioteka {store}", store=adapter.label))
@@ -495,14 +495,14 @@ class StorePage(QWidget):
         heading_box.addWidget(heading)
         header.addLayout(heading_box)
         header.addStretch(1)
-        self.stats_label = QLabel(tr("0 GIER // 0 ZAINSTALOWANYCH"))
+        self.stats_label = QLabel(tr("0 gier  ·  0 zainstalowanych"))
         self.stats_label.setObjectName("StatsPill")
         header.addWidget(self.stats_label)
-        self.account_button = QPushButton(tr("ZALOGUJ SIĘ"))
+        self.account_button = QPushButton(tr("Zaloguj się"))
         self.account_button.setObjectName("GhostButton")
         self.account_button.clicked.connect(self._account_clicked)
         header.addWidget(self.account_button)
-        settings_button = QPushButton(tr("USTAWIENIA {store}", store=adapter.label))
+        settings_button = QPushButton(tr("Ustawienia {store}", store=adapter.label))
         settings_button.setObjectName("GhostButton")
         settings_button.clicked.connect(lambda: self.settings_requested.emit(self.store))
         header.addWidget(settings_button)
@@ -517,6 +517,7 @@ class StorePage(QWidget):
         )
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(lambda _text: self._search_timer.start())
+        self.search_edit.hide()
         toolbar.addWidget(self.search_edit, 1)
         self.filter_combo = QComboBox()
         self.filter_combo.addItem(tr("Wszystkie gry"), None)
@@ -524,7 +525,7 @@ class StorePage(QWidget):
         self.filter_combo.addItem(tr("Nie zainstalowane"), 0)
         self.filter_combo.currentIndexChanged.connect(self.reload)
         toolbar.addWidget(self.filter_combo)
-        self.sync_button = QPushButton(tr("↻  ODŚWIEŻ BIBLIOTEKĘ"))
+        self.sync_button = QPushButton(tr("↻  Odśwież bibliotekę"))
         self.sync_button.setObjectName("GhostButton")
         self.sync_button.clicked.connect(lambda: self.sync_requested.emit(self.store))
         toolbar.addWidget(self.sync_button)
@@ -534,7 +535,7 @@ class StorePage(QWidget):
         body.setSpacing(14)
         self.table = QTreeWidget()
         self.table.setObjectName("StoreTable")
-        self.table.setHeaderLabels([tr("GRA"), tr("ROZMIAR"), tr("STATUS")])
+        self.table.setHeaderLabels([tr("Gra"), tr("Rozmiar"), tr("Status")])
         self.table.setRootIsDecorated(False)
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(
@@ -559,7 +560,7 @@ class StorePage(QWidget):
         details_layout = QVBoxLayout(details)
         details_layout.setContentsMargins(18, 16, 18, 16)
         details_layout.setSpacing(9)
-        detail_kicker = QLabel(tr("WYBRANA GRA"))
+        detail_kicker = QLabel(tr("Wybrana gra"))
         detail_kicker.setObjectName("PageKicker")
         details_layout.addWidget(detail_kicker)
         self.cover = QLabel()
@@ -592,29 +593,29 @@ class StorePage(QWidget):
         self.description.setMaximumHeight(110)
         details_layout.addWidget(self.description)
         details_layout.addStretch(1)
-        self.install_button = QPushButton(tr("ZAINSTALUJ"))
+        self.install_button = QPushButton(tr("Zainstaluj"))
         self.install_button.setObjectName("PrimaryButton")
         self.install_button.clicked.connect(self._install_current)
         details_layout.addWidget(self.install_button)
-        self.play_button = QPushButton(tr("▶  GRAJ"))
+        self.play_button = QPushButton(tr("▶   Graj"))
         self.play_button.setObjectName("PrimaryButton")
         self.play_button.clicked.connect(self._launch_current)
         details_layout.addWidget(self.play_button)
         maintenance = QHBoxLayout()
-        self.update_button = QPushButton(tr("AKTUALIZUJ"))
+        self.update_button = QPushButton(tr("Aktualizuj"))
         self.update_button.setObjectName("GhostButton")
         self.update_button.clicked.connect(self._update_current)
         maintenance.addWidget(self.update_button)
-        self.verify_button = QPushButton(tr("WERYFIKUJ"))
+        self.verify_button = QPushButton(tr("Weryfikuj"))
         self.verify_button.setObjectName("GhostButton")
         self.verify_button.clicked.connect(self._verify_current)
         maintenance.addWidget(self.verify_button)
         details_layout.addLayout(maintenance)
-        self.folder_button = QPushButton(tr("OTWÓRZ KATALOG GRY"))
+        self.folder_button = QPushButton(tr("Otwórz katalog gry"))
         self.folder_button.setObjectName("GhostButton")
         self.folder_button.clicked.connect(self._folder_current)
         details_layout.addWidget(self.folder_button)
-        self.uninstall_button = QPushButton(tr("ODINSTALUJ"))
+        self.uninstall_button = QPushButton(tr("Odinstaluj"))
         self.uninstall_button.setObjectName("GhostButton")
         self.uninstall_button.clicked.connect(self._uninstall_current)
         details_layout.addWidget(self.uninstall_button)
@@ -631,11 +632,11 @@ class StorePage(QWidget):
         self._logged_in = bool(logged_in)
         if self._logged_in:
             self.account_button.setText(
-                self._account_name or tr("WYLOGUJ")
+                self._account_name or tr("Wyloguj")
             )
             self.account_button.setToolTip(tr("Wyloguj"))
         else:
-            self.account_button.setText(tr("ZALOGUJ SIĘ"))
+            self.account_button.setText(tr("Zaloguj się"))
             self.account_button.setToolTip(tr("Podłącz konto"))
         self.reload()
 
@@ -657,7 +658,7 @@ class StorePage(QWidget):
         stats = self.db.store_library_stats(self.store)
         self.stats_label.setText(
             tr(
-                "{total} GIER // {installed} ZAINSTALOWANYCH",
+                "{total} gier  ·  {installed} zainstalowanych",
                 total=stats["total"],
                 installed=stats["installed"],
             )
@@ -669,9 +670,9 @@ class StorePage(QWidget):
         for game in self._games:
             store_id = str(game.get("store_id", ""))
             installed = bool(game.get("installed"))
-            status = tr("ZAINSTALOWANA") if installed else tr("W BIBLIOTECE")
+            status = tr("Zainstalowana") if installed else tr("W bibliotece")
             if installed and store_id in self._updates:
-                status = tr("AKTUALIZACJA")
+                status = tr("Aktualizacja")
             item = QTreeWidgetItem(
                 [
                     str(game.get("title", "")),
@@ -1069,15 +1070,15 @@ class StoreSettingsPanel(QWidget):
         outer.addLayout(form)
 
         actions = QHBoxLayout()
-        setup = QPushButton(tr("POBIERZ / AKTUALIZUJ"))
+        setup = QPushButton(tr("Pobierz / aktualizuj"))
         setup.setObjectName("GhostButton")
         setup.clicked.connect(lambda: self.setup_requested.emit(self.adapter.id))
         actions.addWidget(setup)
-        login = QPushButton(tr("ZALOGUJ SIĘ"))
+        login = QPushButton(tr("Zaloguj się"))
         login.setObjectName("PrimaryButton")
         login.clicked.connect(lambda: self.login_requested.emit(self.adapter.id))
         actions.addWidget(login)
-        logout = QPushButton(tr("WYLOGUJ"))
+        logout = QPushButton(tr("Wyloguj"))
         logout.setObjectName("GhostButton")
         logout.clicked.connect(lambda: self.logout_requested.emit(self.adapter.id))
         actions.addWidget(logout)
