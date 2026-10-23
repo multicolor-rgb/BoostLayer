@@ -8,14 +8,18 @@ runtime jest **PyQt6**.
 
 ## Funkcje
 
-- **Biblioteka** — trzy widoki: siatka, kompaktowy i minimalny (tray).
-- **Motywy** — Cyber Cyan, Crimson, Amber, Emerald, Violet i Graphite;
-  wybór w Ustawieniach → Wygląd.
+- **Biblioteka** — nowoczesny interfejs w stylu Epic Games Store i Heroic:
+  duży banner wybranej gry, siatka okładek z nakładką hover, widok listy oraz
+  tryb minimalny (tray).
+- **Motywy** — Epic Dark, Heroic Violet i Ember; wybór w
+  Ustawieniach → Wygląd. Paleta jest neutralna, a akcent używany oszczędnie.
+- **Układ** — górny pasek z globalną wyszukiwarką i ikonową szyną nawigacji
+  (zwijaną do samych ikon), spójne karty, chipy i przyciski w całej aplikacji.
 - **Języki** — polski (domyślny), angielski i niemiecki; wybór w
   Ustawieniach → Wygląd → Język. Zmiana działa od razu, bez restartu
   aplikacji.
-- **Ikona** — monogram BL z błyskawicą, dynamiczny akcent w trayu oraz
-  pełny zestaw PNG/SVG w AppImage i `.deb`.
+- **Ikona** — biały monogram BL na czarnym tle, spójny w oknie, trayu,
+  menu i pakietach AppImage/.deb (pełny zestaw PNG/SVG).
 - **Tryb konsolowy** — pełnoekranowy Big Picture z dużymi okładkami,
   dynamicznym tłem z okładki, kinową poświatą motywu i obsługą pada
   (`/dev/input/js*`). Po zakończeniu gry standalone wraca automatycznie do
@@ -182,3 +186,5 @@ git push origin "v$(cat VERSION)"
 ## Licencja
 
 MIT — zobacz `LICENSE`.
+
+Historia i numeracja zmian: [CHANGELOG.md](CHANGELOG.md).

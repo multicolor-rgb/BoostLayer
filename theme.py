@@ -1,14 +1,16 @@
 """Boostlayer colour themes and stylesheet token replacement.
 
-The original QSS was written around the Cyber Cyan palette.  We keep that
-stylesheet as the structural source and replace its colour literals with the
-active theme, then append a few component overrides for elements that need a
-stronger accent.
+The interface follows the visual language of modern game launchers: flat dark
+surfaces, a neutral typographic scale and a single accent colour used sparingly.
+Stylesheets are written with ``${token}`` placeholders which are resolved from
+the active :class:`Theme` by :func:`build_qss`.
 """
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -17,53 +19,127 @@ class Theme:
     name: str
     background: str
     background_dark: str
-    panel: str
-    panel_alt: str
+    surface: str
+    surface_alt: str
+    surface_hover: str
     border: str
+    border_strong: str
     accent: str
-    accent_soft: str
+    accent_hover: str
     accent_dim: str
-    accent2: str
-    danger: str
-    success: str
+    accent_soft: str
+    accent_soft_strong: str
+    on_accent: str
     text: str
     muted: str
+    dim: str
+    danger: str
+    danger_soft: str
+    success: str
+    success_soft: str
+    warning: str
+
+    # -- compatibility aliases used by older widgets ---------------------
+    @property
+    def panel(self) -> str:
+        return self.surface
+
+    @property
+    def panel_alt(self) -> str:
+        return self.surface_alt
+
+    @property
+    def accent_soft_color(self) -> str:
+        return self.accent_soft
+
+    @property
+    def accent2(self) -> str:
+        return self.warning
+
+    @property
+    def text_muted(self) -> str:
+        return self.muted
 
 
 THEMES: dict[str, Theme] = {
-    "cyber": Theme(
-        "cyber", "Cyber Cyan", "#0E1013", "#0A0C0E", "#101418", "#14191E",
-        "#2A343D", "#00E5FF", "#00C8E0", "#00A7BA", "#2FD6E8",
-        "#FF335F", "#42F5A7", "#DCEBF1", "#69808B",
+    "epic": Theme(
+        key="epic",
+        name="Epic Dark",
+        background="#121212",
+        background_dark="#0A0A0B",
+        surface="#1A1A1C",
+        surface_alt="#212124",
+        surface_hover="#26262A",
+        border="#2C2C30",
+        border_strong="#3A3A40",
+        accent="#0F8BFF",
+        accent_hover="#3BA1FF",
+        accent_dim="#0B6AC4",
+        accent_soft="rgba(15, 139, 255, 0.16)",
+        accent_soft_strong="rgba(15, 139, 255, 0.28)",
+        on_accent="#FFFFFF",
+        text="#F2F2F3",
+        muted="#9A9AA0",
+        dim="#6E6E75",
+        danger="#F2555A",
+        danger_soft="rgba(242, 85, 90, 0.16)",
+        success="#4ADE80",
+        success_soft="rgba(74, 222, 128, 0.16)",
+        warning="#F5A623",
     ),
-    "crimson": Theme(
-        "crimson", "Crimson", "#130E11", "#0D090B", "#1A1115", "#211318",
-        "#452832", "#FF335F", "#E32A54", "#B92341", "#FF7890",
-        "#FF335F", "#42F5A7", "#F2E6EA", "#95717D",
+    "heroic": Theme(
+        key="heroic",
+        name="Heroic Violet",
+        background="#0F0F13",
+        background_dark="#09090C",
+        surface="#17171C",
+        surface_alt="#1E1E25",
+        surface_hover="#24242C",
+        border="#2A2A33",
+        border_strong="#383842",
+        accent="#A26BF7",
+        accent_hover="#B98CFF",
+        accent_dim="#7C4FD6",
+        accent_soft="rgba(162, 107, 247, 0.16)",
+        accent_soft_strong="rgba(162, 107, 247, 0.30)",
+        on_accent="#FFFFFF",
+        text="#F3F1F7",
+        muted="#98939F",
+        dim="#6B6675",
+        danger="#F2555A",
+        danger_soft="rgba(242, 85, 90, 0.16)",
+        success="#4ADE80",
+        success_soft="rgba(74, 222, 128, 0.16)",
+        warning="#F5A623",
     ),
-    "amber": Theme(
-        "amber", "Amber", "#13100B", "#0D0A07", "#1B1610", "#231B12",
-        "#4A3822", "#FFB347", "#E89A31", "#C77A22", "#FFD166",
-        "#FF5C5C", "#8FE388", "#F5EEE2", "#9A866B",
-    ),
-    "emerald": Theme(
-        "emerald", "Emerald", "#0B1310", "#070D0B", "#101B17", "#14231D",
-        "#28483C", "#42F5A7", "#2ED38E", "#20A971", "#7CFFD0",
-        "#FF5C7A", "#42F5A7", "#E3F7EE", "#6F9384",
-    ),
-    "violet": Theme(
-        "violet", "Violet", "#100E16", "#0A080F", "#17131F", "#1E182A",
-        "#3E3158", "#B388FF", "#9A6EF0", "#7D54CF", "#D6BBFF",
-        "#FF4D8D", "#42F5A7", "#EEE9F8", "#837695",
-    ),
-    "graphite": Theme(
-        "graphite", "Graphite", "#101214", "#090B0C", "#171A1D", "#1E2226",
-        "#3A4248", "#9AA8B0", "#7E8D96", "#65737C", "#C0CCD2",
-        "#D66A72", "#8BC9A9", "#E4EAED", "#78858D",
+    "ember": Theme(
+        key="ember",
+        name="Ember",
+        background="#141210",
+        background_dark="#0B0908",
+        surface="#1C1917",
+        surface_alt="#24201D",
+        surface_hover="#2B2622",
+        border="#332C27",
+        border_strong="#453B34",
+        accent="#FF7A45",
+        accent_hover="#FF9668",
+        accent_dim="#CC5D31",
+        accent_soft="rgba(255, 122, 69, 0.16)",
+        accent_soft_strong="rgba(255, 122, 69, 0.30)",
+        on_accent="#1A0D07",
+        text="#F5F0EC",
+        muted="#A2968C",
+        dim="#746A62",
+        danger="#F2555A",
+        danger_soft="rgba(242, 85, 90, 0.16)",
+        success="#4ADE80",
+        success_soft="rgba(74, 222, 128, 0.16)",
+        warning="#F5A623",
     ),
 }
 
-DEFAULT_THEME = "cyber"
+DEFAULT_THEME = "epic"
 _ACTIVE = THEMES[DEFAULT_THEME]
 
 
@@ -77,242 +153,204 @@ def get_theme() -> Theme:
     return _ACTIVE
 
 
-_COLOR_MAP = {
-    "#0E1013": "background",
-    "#0A0C0E": "background_dark",
-    "#0D1115": "panel",
-    "#0E1114": "panel",
-    "#101418": "panel",
-    "#11171C": "panel",
-    "#12171B": "panel",
-    "#12181D": "panel_alt",
-    "#14191E": "panel_alt",
-    "#1D242B": "panel_alt",
-    "#20262D": "border",
-    "#252B32": "border",
-    "#252D35": "border",
-    "#242D35": "border",
-    "#26323A": "border",
-    "#2A343D": "border",
-    "#00E5FF": "accent",
-    "#00C8E0": "accent_soft",
-    "#00A7BA": "accent_dim",
-    "#00B8CC": "accent_soft",
-    "#00B8FF": "accent",
-    "#FF335F": "danger",
-    "#FF4D6D": "danger",
-    "#C4213E": "danger",
-    "#B92341": "danger",
-    "#FFB347": "accent2",
-    "#42F5A7": "success",
-    "#DCEBF1": "text",
-    "#E6FAFF": "text",
-    "#E9FAFF": "text",
-    "#69808B": "muted",
-    "#5D707C": "muted",
-    "#71858F": "muted",
-    "#8FA3AE": "muted",
-    "#98AAB5": "muted",
-    "#7B8D98": "muted",
-}
+def _icon_dir() -> Path:
+    candidates = [
+        Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)),
+        Path(__file__).resolve().parent,
+    ]
+    for base in candidates:
+        folder = base / "assets" / "ui"
+        if folder.is_dir():
+            return folder
+    return candidates[0] / "assets" / "ui"
 
 
-def build_qss(base: str) -> str:
-    theme = get_theme()
-    pattern = re.compile(
-        "|".join(re.escape(token) for token in sorted(_COLOR_MAP, key=len, reverse=True)),
-        re.IGNORECASE,
-    )
-    result = pattern.sub(
-        lambda match: getattr(theme, _COLOR_MAP[match.group(0).upper()]),
+def theme_tokens(theme: Theme | None = None) -> dict[str, str]:
+    """Return the style token table for *theme* (active theme by default)."""
+    theme = theme or get_theme()
+    icons = _icon_dir()
+    tokens = {
+        "bg": theme.background,
+        "bg_dark": theme.background_dark,
+        "surface": theme.surface,
+        "surface_alt": theme.surface_alt,
+        "surface_hover": theme.surface_hover,
+        "border": theme.border,
+        "border_strong": theme.border_strong,
+        "accent": theme.accent,
+        "accent_hover": theme.accent_hover,
+        "accent_dim": theme.accent_dim,
+        "accent_soft": theme.accent_soft,
+        "accent_soft_strong": theme.accent_soft_strong,
+        "on_accent": theme.on_accent,
+        "text": theme.text,
+        "muted": theme.muted,
+        "dim": theme.dim,
+        "danger": theme.danger,
+        "danger_soft": theme.danger_soft,
+        "success": theme.success,
+        "success_soft": theme.success_soft,
+        "warning": theme.warning,
+        "icon_check": str(icons / "check.svg"),
+        "icon_chevron_down": str(icons / "chevron-down.svg"),
+        "icon_chevron_up": str(icons / "chevron-up.svg"),
+        "radius": "8px",
+        "radius_lg": "12px",
+        "radius_xl": "16px",
+    }
+    return tokens
+
+
+_TOKEN_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def _resolve(base: str, theme: Theme) -> str:
+    tokens = theme_tokens(theme)
+    return _TOKEN_RE.sub(
+        lambda match: tokens.get(match.group(1), match.group(0)),
         base,
     )
-    result += f"""
-QWidget#Root {{
-    background: {theme.background};
-    border: 1px solid {theme.border};
-}}
-QFrame#TitleBar {{
-    background: {theme.background_dark};
-    border-bottom: 1px solid {theme.border};
-}}
-QLabel#BrandMark, QLabel#Accent, QLabel#PageKicker, QLabel#SectionTitle {{
-    color: {theme.accent};
-}}
-QPushButton#PrimaryButton {{
-    background: {theme.accent};
-    color: {theme.background_dark};
-    border: 1px solid {theme.accent};
-}}
-QPushButton#PrimaryButton:hover {{
-    background: {theme.accent_soft};
-    border-color: {theme.accent_soft};
-}}
-QPushButton#DangerButton {{
-    color: {theme.danger};
-    border-color: {theme.danger};
-}}
-QPushButton#DangerButton:hover {{
-    background: {theme.danger};
-    color: {theme.background_dark};
-}}
-QProgressBar::chunk {{
-    background: {theme.accent};
-}}
-QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
-    background: {theme.border};
-}}
-QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
-    background: {theme.accent_dim};
-}}
-QWidget#ConsoleRoot {{
+
+
+CONSOLE_QSS = """
+QWidget#ConsoleRoot {
     background: transparent;
-}}
-QLabel#ConsoleBackdrop {{
+}
+QLabel#ConsoleBackdrop {
     background: transparent;
-}}
-QFrame#ConsoleShade {{
+}
+QFrame#ConsoleShade {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 rgba(4, 8, 11, 130),
-        stop:0.48 rgba(7, 11, 14, 205),
-        stop:1 {theme.background});
-}}
-QFrame#ConsoleHeader {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {theme.background_dark},
-        stop:1 {theme.panel});
-    border: 1px solid {theme.border};
-    border-radius: 10px;
-}}
-QLabel#ConsoleBrand {{
-    color: {theme.accent};
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 12pt;
-    font-weight: 800;
-    letter-spacing: 3px;
-}}
-QLabel#ConsoleKicker {{
-    color: {theme.muted};
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
-    letter-spacing: 2px;
-}}
-QLabel#ConsoleClock {{
-    color: {theme.accent};
-    font-family: "DejaVu Sans Mono", monospace;
+        stop:0 rgba(6, 6, 8, 150),
+        stop:0.45 rgba(8, 8, 10, 210),
+        stop:1 ${bg});
+}
+QFrame#ConsoleHeader {
+    background: rgba(14, 14, 16, 0.82);
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
+}
+QLabel#ConsoleBrand {
+    color: ${text};
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 13pt;
+    font-weight: 800;
+}
+QLabel#ConsoleKicker {
+    color: ${muted};
+    font-size: 8pt;
+    letter-spacing: 1px;
+}
+QLabel#ConsoleClock {
+    color: ${text};
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 12pt;
     font-weight: 700;
     padding: 0 12px;
-}}
-QLabel#ConsolePad {{
-    color: {theme.muted};
-    background: {theme.background_dark};
-    border: 1px solid {theme.border};
-    border-radius: 10px;
+}
+QLabel#ConsolePad {
+    color: ${muted};
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: 8px;
     padding: 5px 10px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
-}}
-QLabel#ConsolePad[available="true"] {{
-    color: {theme.success};
-    border-color: {theme.success};
-}}
-QLabel#ConsoleMuted {{
-    color: {theme.muted};
-    font-family: "DejaVu Sans Mono", monospace;
     font-size: 8pt;
-}}
-QLabel#ConsoleTitle {{
-    color: {theme.text};
-    font-size: 23pt;
+}
+QLabel#ConsolePad[available="true"] {
+    color: ${success};
+    border-color: ${success};
+}
+QLabel#ConsoleMuted {
+    color: ${muted};
+    font-size: 9pt;
+}
+QLabel#ConsoleTitle {
+    color: ${text};
+    font-size: 22pt;
     font-weight: 800;
-    letter-spacing: 1px;
-}}
-QLabel#ConsoleCover {{
-    background: {theme.panel};
-    border: 1px solid {theme.border};
-    border-radius: 12px;
+}
+QLabel#ConsoleCover {
+    background: ${surface};
+    border: 1px solid ${border};
+    border-radius: ${radius_lg};
     padding: 8px;
-}}
-QListWidget#ConsoleTiles {{
+}
+QListWidget#ConsoleTiles {
     background: transparent;
     border: 0;
     outline: none;
     padding: 4px;
-}}
-QListWidget#ConsoleTiles::item {{
+}
+QListWidget#ConsoleTiles::item {
     background: transparent;
     border: 0;
     padding: 0;
     margin: 0;
-}}
-QFrame#ConsoleDetails {{
-    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-        stop:0 {theme.panel_alt},
-        stop:1 {theme.panel});
-    border: 1px solid {theme.border};
-    border-radius: 12px;
-}}
-QFrame#ConsoleChips {{
+}
+QFrame#ConsoleDetails {
+    background: rgba(18, 18, 20, 0.86);
+    border: 1px solid ${border};
+    border-radius: ${radius_xl};
+}
+QFrame#ConsoleChips {
     background: transparent;
     border: 0;
-}}
-QLabel#ConsoleChip {{
-    color: {theme.text};
-    background: {theme.background_dark};
-    border: 1px solid {theme.border};
+}
+QLabel#ConsoleChip {
+    color: ${text};
+    background: ${surface_alt};
+    border: 1px solid ${border};
     border-radius: 7px;
-    padding: 5px 8px;
-    font-family: "DejaVu Sans Mono", monospace;
-    font-size: 7pt;
-}}
-QFrame#ConsoleFooterBar {{
-    background: {theme.background_dark};
-    border: 1px solid {theme.border};
-    border-radius: 9px;
-}}
-QLabel#ConsoleKey {{
-    color: {theme.background_dark};
-    background: {theme.accent};
+    padding: 5px 9px;
+    font-size: 8pt;
+    font-weight: 600;
+}
+QFrame#ConsoleFooterBar {
+    background: rgba(10, 10, 11, 0.88);
+    border: 1px solid ${border};
+    border-radius: 10px;
+}
+QLabel#ConsoleKey {
+    color: ${on_accent};
+    background: ${accent};
     border-radius: 5px;
-    padding: 3px 7px;
-    font-family: "DejaVu Sans Mono", monospace;
+    padding: 3px 8px;
     font-size: 8pt;
     font-weight: 800;
-}}
-QLabel#ConsoleKeyLabel {{
-    color: {theme.muted};
-    font-family: "DejaVu Sans Mono", monospace;
+}
+QLabel#ConsoleKeyLabel {
+    color: ${muted};
     font-size: 8pt;
-}}
-QPushButton#ConsolePrimary {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {theme.accent},
-        stop:1 {theme.accent_soft});
-    color: {theme.background_dark};
-    border: 1px solid {theme.accent};
-    border-radius: 8px;
+}
+QPushButton#ConsolePrimary {
+    background: ${accent};
+    color: ${on_accent};
+    border: 1px solid ${accent};
+    border-radius: ${radius};
     padding: 14px;
     font-size: 11pt;
     font-weight: 800;
-    letter-spacing: 1px;
-}}
-QPushButton#ConsolePrimary:hover {{
-    background: {theme.accent_soft};
-}}
-QPushButton#ConsoleGhost {{
+}
+QPushButton#ConsolePrimary:hover {
+    background: ${accent_hover};
+    border-color: ${accent_hover};
+}
+QPushButton#ConsoleGhost {
     background: transparent;
-    color: {theme.muted};
-    border: 1px solid {theme.border};
-    border-radius: 7px;
+    color: ${muted};
+    border: 1px solid ${border_strong};
+    border-radius: 8px;
     padding: 9px 12px;
-}}
-QPushButton#ConsoleGhost:hover {{
-    color: {theme.text};
-    border-color: {theme.accent};
-}}
+}
+QPushButton#ConsoleGhost:hover {
+    color: ${text};
+    border-color: ${accent};
+}
 """
-    return result
+
+
+def build_qss(base: str) -> str:
+    return _resolve(base, get_theme()) + _resolve(CONSOLE_QSS, get_theme())
 
 
 def build_tray_qss(base: str) -> str:

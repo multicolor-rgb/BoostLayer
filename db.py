@@ -141,7 +141,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "steam_library_synced": "",
     "auto_steam_wrapper": "1",
     "global_hotkey": "1",
-    "theme": "cyber",
+    "theme": "epic",
     "language": "pl",
     "console_monitor": "0",
     "mangohud_profile": json.dumps(DEFAULT_MANGOHUD),

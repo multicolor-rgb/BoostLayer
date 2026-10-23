@@ -30,23 +30,19 @@ from pathlib import Path
 from collections.abc import Iterable
 from typing import Any, Callable
 
-from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QRectF, QThread, Qt, pyqtSignal
 
 from i18n import tr
 from PyQt6.QtGui import (
     QColor,
     QFont,
     QIcon,
-    QLinearGradient,
     QPainter,
-    QPainterPath,
-    QPen,
     QPixmap,
 )
 
 import db
 from db import Database
-from theme import get_theme
 
 APP_NAME = "Boostlayer"
 APP_ID = "boostlayer"
@@ -423,55 +419,35 @@ def ensure_crt_shader() -> Path:
 
 
 def _icon_pixmap(size: int) -> QPixmap:
-    theme = get_theme()
+    """Black rounded square with a white BL monogram."""
+    size = max(8, int(size))
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    from PyQt6.QtCore import QPointF, QRectF
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
-    rect = QRectF(3, 3, size - 6, size - 6)
-    gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-    gradient.setColorAt(0.0, QColor("#101418"))
-    gradient.setColorAt(1.0, QColor(theme.background_dark))
-    painter.setBrush(gradient)
-    painter.setPen(QPen(QColor(theme.accent), max(1.5, size / 52.0)))
-    painter.drawRoundedRect(rect, size * 0.20, size * 0.20)
+    rect = QRectF(0.5, 0.5, size - 1.0, size - 1.0)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor("#000000"))
+    painter.drawRoundedRect(rect, size * 0.22, size * 0.22)
 
-    # BL monogram.  A slightly negative tracking keeps it readable in a
-    # square icon at tray sizes.
-    font = QFont("DejaVu Sans", max(8, int(size * 0.34)), QFont.Weight.Black)
-    font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -size * 0.045)
-    painter.setFont(font)
-    painter.setPen(QColor(theme.accent))
-    painter.drawText(
-        rect.adjusted(-size * 0.10, size * 0.045, -size * 0.16, 0),
-        Qt.AlignmentFlag.AlignCenter,
-        "BL",
+    font = QFont("DejaVu Sans")
+    font.setPixelSize(max(6, int(size * 0.50)))
+    font.setWeight(QFont.Weight.Black)
+    font.setLetterSpacing(
+        QFont.SpacingType.AbsoluteSpacing, -size * 0.045
     )
+    painter.setFont(font)
+    painter.setPen(QColor("#FFFFFF"))
+    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "BL")
 
-    # Lightning bolt.
-    bolt = QPainterPath()
-    bolt.moveTo(QPointF(size * 0.80, size * 0.12))
-    bolt.lineTo(QPointF(size * 0.52, size * 0.52))
-    bolt.lineTo(QPointF(size * 0.66, size * 0.52))
-    bolt.lineTo(QPointF(size * 0.46, size * 0.88))
-    bolt.lineTo(QPointF(size * 0.83, size * 0.40))
-    bolt.lineTo(QPointF(size * 0.69, size * 0.40))
-    bolt.closeSubpath()
-    painter.setPen(QPen(QColor(theme.background_dark), max(1.0, size / 70.0)))
-    painter.setBrush(QColor(theme.danger))
-    painter.drawPath(bolt)
-    if size >= 32:
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.danger))
-        painter.drawEllipse(QPointF(size * 0.83, size * 0.83), size * 0.028, size * 0.028)
     painter.end()
     return pixmap
 
 
 def app_icon(size: int = 256) -> QIcon:
-    """Return the BL/lightning icon, with multiple native sizes."""
+    """Return the black-and-white BL icon, with multiple native sizes."""
     icon = QIcon()
     for icon_size in (16, 24, 32, 48, 64, 128, 256):
         icon.addPixmap(_icon_pixmap(icon_size))
